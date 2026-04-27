@@ -25,11 +25,39 @@ export function newAiSessionId(): string {
   return randomUUID();
 }
 
+// Best-effort migration from the old multi-provider shape: pick the most
+// recently-used binding. Returns null if the entry can't be salvaged.
+function migrate(raw: any): AiSession | null {
+  if (!raw || typeof raw !== "object") return null;
+  if (typeof raw.provider === "string" && typeof raw.sessionId === "string") {
+    return raw as AiSession; // already new shape
+  }
+  if (raw.providers && typeof raw.providers === "object") {
+    const entries = Object.entries(raw.providers as Record<string, any>);
+    if (!entries.length) return null;
+    entries.sort((a, b) =>
+      String(b[1]?.lastUsedAt ?? "").localeCompare(String(a[1]?.lastUsedAt ?? ""))
+    );
+    const [provider, link] = entries[0];
+    if (!link?.sessionId) return null;
+    return {
+      id: raw.id,
+      name: raw.name ?? null,
+      provider,
+      sessionId: link.sessionId,
+      createdAt: raw.createdAt ?? new Date().toISOString(),
+      updatedAt: raw.updatedAt ?? new Date().toISOString(),
+    };
+  }
+  return null;
+}
+
 export function read(id: string): AiSession | null {
   const p = sessionPath(id);
   if (!existsSync(p)) return null;
   try {
-    return JSON.parse(readFileSync(p, "utf8")) as AiSession;
+    const raw = JSON.parse(readFileSync(p, "utf8"));
+    return migrate(raw);
   } catch {
     return null;
   }
@@ -54,7 +82,9 @@ export function list(): AiSession[] {
   const out: AiSession[] = [];
   for (const f of files) {
     try {
-      out.push(JSON.parse(readFileSync(join(sessionsDir(), f), "utf8")));
+      const raw = JSON.parse(readFileSync(join(sessionsDir(), f), "utf8"));
+      const s = migrate(raw);
+      if (s) out.push(s);
     } catch {
       /* skip */
     }
@@ -62,42 +92,32 @@ export function list(): AiSession[] {
   return out.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
 }
 
+// Find the AiSession that owns this (provider, providerSessionId) pair.
 export function findByProviderSession(
   provider: string,
   providerSessionId: string,
 ): AiSession | null {
   for (const s of list()) {
-    if (s.providers[provider]?.sessionId === providerSessionId) return s;
+    if (s.provider === provider && s.sessionId === providerSessionId) return s;
   }
   return null;
 }
 
-export function attach(
-  ai: AiSession,
-  provider: string,
-  providerSessionId: string,
-): AiSession {
-  ai.providers[provider] = {
-    sessionId: providerSessionId,
-    lastUsedAt: new Date().toISOString(),
+export function create(args: {
+  provider: string;
+  sessionId: string;
+  name?: string | null;
+  model?: string;
+}): AiSession {
+  const now = new Date().toISOString();
+  const ai: AiSession = {
+    id: newAiSessionId(),
+    name: args.name ?? null,
+    provider: args.provider,
+    sessionId: args.sessionId,
+    model: args.model,
+    createdAt: now,
+    updatedAt: now,
   };
-  return write(ai);
-}
-
-// Set or clear a provider mapping. Pass a non-empty string to set;
-// pass null or empty string to unset.
-export function setProvider(
-  ai: AiSession,
-  provider: string,
-  providerSessionId: string | null,
-): AiSession {
-  if (!providerSessionId) {
-    delete ai.providers[provider];
-  } else {
-    ai.providers[provider] = {
-      sessionId: providerSessionId,
-      lastUsedAt: new Date().toISOString(),
-    };
-  }
   return write(ai);
 }

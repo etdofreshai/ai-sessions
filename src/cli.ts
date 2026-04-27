@@ -175,8 +175,7 @@ sessions
       return;
     }
     for (const s of all) {
-      const provs = Object.keys(s.providers).join(",");
-      console.log(`${s.updatedAt}  ${s.id}  [${provs}]  ${s.name ?? ""}`);
+      console.log(`${s.updatedAt}  ${s.id}  ${s.provider}  ${s.name ?? ""}`);
     }
   });
 
@@ -207,32 +206,31 @@ sessions
   });
 
 sessions
-  .command("map <id> <provider> [providerSessionId]")
+  .command("fork <id> <newProvider>")
   .description(
-    "Attach a provider session to an AiSession. Omit providerSessionId (or pass empty) to unset."
+    "Create a new AiSession on a different provider, seeded from the source session"
   )
-  .action((id: string, provider: string, providerSessionId?: string) => {
-    const s = aiStore.read(id);
-    if (!s) {
-      console.error(`ai-session not found: ${id}`);
-      process.exit(1);
+  .option("--destructive", "summarize instead of replaying full transcript")
+  .option("-c, --cwd <dir>", "working directory for the seed run on the new provider")
+  .action(
+    async (
+      id: string,
+      newProvider: string,
+      opts: { destructive?: boolean; cwd?: string }
+    ) => {
+      const { forkAiSession } = await import("./ai-sessions/fork.js");
+      const result = await forkAiSession({
+        sourceId: id,
+        targetProvider: newProvider,
+        destructive: opts.destructive,
+        cwd: opts.cwd,
+      });
+      console.log(`forked: ${result.id}  provider: ${result.provider}  session: ${result.sessionId}`);
+      console.error(
+        `seed mode: ${result.seedMode}  (~${result.estimatedTokens} tokens estimated)`
+      );
     }
-    aiStore.setProvider(s, provider, providerSessionId || null);
-    console.log(JSON.stringify(s.providers, null, 2));
-  });
-
-sessions
-  .command("unmap <id> <provider>")
-  .description("Remove a provider mapping from an AiSession")
-  .action((id: string, provider: string) => {
-    const s = aiStore.read(id);
-    if (!s) {
-      console.error(`ai-session not found: ${id}`);
-      process.exit(1);
-    }
-    aiStore.setProvider(s, provider, null);
-    console.log(JSON.stringify(s.providers, null, 2));
-  });
+  );
 
 sessions
   .command("delete <id>")

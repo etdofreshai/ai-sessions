@@ -84,7 +84,7 @@ export const openapi = {
                 properties: {
                   prompt: { type: "string" },
                   sessionId: { type: "string", description: "Provider session id (claude session_id, codex thread_id, etc.)" },
-                  aiSessionId: { type: "string", description: "Logical AiSession id from POST /ai-sessions; auto-resolves the provider sessionId." },
+                  aiSessionId: { type: "string", description: "Logical Session id from /sessions; auto-resolves the provider sessionId." },
                   cwd: { type: "string" },
                   yolo: { type: "boolean", description: "Default true." },
                 },
@@ -126,13 +126,13 @@ export const openapi = {
         },
       },
     },
-    "/ai-sessions": {
+    "/sessions": {
       get: {
         summary: "List AiSessions (logical, provider-agnostic)",
         responses: { "200": { description: "Array of AiSession" } },
       },
     },
-    "/ai-sessions/{id}": {
+    "/sessions/{id}": {
       get: {
         summary: "Get an AiSession",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
@@ -160,34 +160,36 @@ export const openapi = {
         responses: { "200": { description: "{ ok: true }" } },
       },
     },
-    "/ai-sessions/{id}/providers/{provider}": {
-      put: {
-        summary: "Map a provider session id to an AiSession",
-        description: "Pass an empty/missing sessionId to unset.",
+    "/sessions/{id}/fork": {
+      post: {
+        summary: "Fork an AiSession onto a different provider, seeded from the source",
+        description:
+          "By default replays the source transcript verbatim if it fits the target's token budget; otherwise (or with destructive:true) summarizes via the default agent and uses that as the seed.",
         parameters: [
           { name: "id", in: "path", required: true, schema: { type: "string" } },
-          { name: "provider", in: "path", required: true, schema: { type: "string" } },
         ],
         requestBody: {
-          required: false,
+          required: true,
           content: {
             "application/json": {
               schema: {
                 type: "object",
-                properties: { sessionId: { type: "string", description: "Empty/omitted = unset" } },
+                required: ["targetProvider"],
+                properties: {
+                  targetProvider: { type: "string", enum: ["claude", "codex", "opencode"] },
+                  destructive: { type: "boolean", description: "Force summary even if replay would fit." },
+                  cwd: { type: "string" },
+                },
               },
             },
           },
         },
-        responses: { "200": { description: "Updated AiSession" } },
-      },
-      delete: {
-        summary: "Remove a provider mapping from an AiSession",
-        parameters: [
-          { name: "id", in: "path", required: true, schema: { type: "string" } },
-          { name: "provider", in: "path", required: true, schema: { type: "string" } },
-        ],
-        responses: { "200": { description: "Updated AiSession" } },
+        responses: {
+          "200": {
+            description:
+              "{ id, provider, sessionId, seedMode: 'replay'|'summary', estimatedTokens } — the new AiSession.",
+          },
+        },
       },
     },
     "/providers/{provider}/runs/{runId}/steer": {

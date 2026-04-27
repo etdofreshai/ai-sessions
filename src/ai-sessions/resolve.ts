@@ -3,26 +3,30 @@ import type { AiSession } from "./types.js";
 
 export interface ResolveArgs {
   provider: string;
-  asId?: string; // explicit AiSession id from --as
-  providerSessionId?: string; // raw --session
+  asId?: string;
+  providerSessionId?: string;
 }
 
 export interface PreResolveResult {
-  // The AiSession object known up-front (if --as resolved an existing one).
   preexisting: AiSession | null;
-  // Whether to look up after the run by providerSessionId returned from the run.
-  // When true, the post-run finalize step will create or attach as needed.
   needsPostResolve: boolean;
 }
 
-// Pre-run resolution: handles `--as <id>` and known `--session <id>` mappings.
-// Returns the AiSession to attribute the run to, if known. If null, the
-// finalize step (post-run) decides based on the provider session id returned.
+// AiSessions are now single-provider. `--as` requires the AiSession to be
+// bound to the same provider as the current run; otherwise the caller must
+// fork instead.
 export function preResolve(args: ResolveArgs): PreResolveResult {
   if (args.asId) {
     const existing = store.read(args.asId);
     if (!existing) {
       throw new Error(`ai-session not found: ${args.asId}`);
+    }
+    if (existing.provider !== args.provider) {
+      throw new Error(
+        `ai-session ${args.asId} is bound to provider "${existing.provider}", ` +
+          `cannot use with provider "${args.provider}". ` +
+          `Use \`ais sessions fork ${args.asId} ${args.provider}\` to create a new AiSession on the target provider.`
+      );
     }
     return { preexisting: existing, needsPostResolve: false };
   }
@@ -30,14 +34,10 @@ export function preResolve(args: ResolveArgs): PreResolveResult {
     const found = store.findByProviderSession(args.provider, args.providerSessionId);
     if (found) return { preexisting: found, needsPostResolve: false };
   }
-  // Need post-run resolution.
   return { preexisting: null, needsPostResolve: true };
 }
 
-// Post-run finalization: given a successful run's providerSessionId, ensure
-// the run is attached to an AiSession. If preexisting is provided, attach the
-// provider session to it (no naming). Otherwise create a fresh AiSession with
-// the supplied (already-generated) name.
+// Post-run finalization: ensure the run is attached to an AiSession.
 export function finalize(args: {
   preexisting: AiSession | null;
   provider: string;
@@ -45,21 +45,14 @@ export function finalize(args: {
   name: string | null;
 }): AiSession {
   if (args.preexisting) {
-    return store.attach(args.preexisting, args.provider, args.providerSessionId);
+    // Same-provider preexisting: just touch updatedAt and possibly update sessionId
+    // (it shouldn't change for a resume, but keep things consistent).
+    args.preexisting.sessionId = args.providerSessionId;
+    return store.write(args.preexisting);
   }
-  // Fresh AiSession.
-  const now = new Date().toISOString();
-  const ai: AiSession = {
-    id: store.newAiSessionId(),
+  return store.create({
+    provider: args.provider,
+    sessionId: args.providerSessionId,
     name: args.name,
-    createdAt: now,
-    updatedAt: now,
-    providers: {
-      [args.provider]: {
-        sessionId: args.providerSessionId,
-        lastUsedAt: now,
-      },
-    },
-  };
-  return store.write(ai);
+  });
 }

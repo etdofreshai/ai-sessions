@@ -41,11 +41,9 @@ export function planAiSessionResolution(args: {
     providerSessionId: args.sessionId,
   });
 
-  // If --as resolved an AiSession that already has a mapping for this
-  // provider, resume that provider session unless caller explicitly passed
-  // --session (which takes priority).
-  const effectiveProviderSessionId =
-    args.sessionId ?? pre.preexisting?.providers[args.provider]?.sessionId;
+  // If --as resolved an AiSession (always same-provider now), resume its
+  // sessionId unless caller explicitly passed --session (takes priority).
+  const effectiveProviderSessionId = args.sessionId ?? pre.preexisting?.sessionId;
 
   // Brand-new AiSession path: kick off naming in parallel.
   let pendingName: Promise<string> | undefined;

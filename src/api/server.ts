@@ -136,17 +136,17 @@ export function createApp() {
   });
 
   // AiSession CRUD.
-  app.get("/ai-sessions", (_req, res) => {
+  app.get("/sessions", (_req, res) => {
     res.json(aiStore.list());
   });
 
-  app.get("/ai-sessions/:id", (req, res) => {
+  app.get("/sessions/:id", (req, res) => {
     const s = aiStore.read(req.params.id);
     if (!s) return res.status(404).json({ error: "ai-session not found" });
     res.json(s);
   });
 
-  app.patch("/ai-sessions/:id", (req, res) => {
+  app.patch("/sessions/:id", (req, res) => {
     const s = aiStore.read(req.params.id);
     if (!s) return res.status(404).json({ error: "ai-session not found" });
     if (typeof req.body?.name === "string") s.name = req.body.name;
@@ -154,26 +154,30 @@ export function createApp() {
     res.json(s);
   });
 
-  app.delete("/ai-sessions/:id", (req, res) => {
+  app.delete("/sessions/:id", (req, res) => {
     const ok = aiStore.remove(req.params.id);
     if (!ok) return res.status(404).json({ error: "ai-session not found" });
     res.json({ ok: true });
   });
 
-  // Map a provider session to an AiSession. Empty/missing sessionId unsets.
-  app.put("/ai-sessions/:id/providers/:provider", (req, res) => {
-    const s = aiStore.read(req.params.id);
-    if (!s) return res.status(404).json({ error: "ai-session not found" });
-    const sid = typeof req.body?.sessionId === "string" ? req.body.sessionId : null;
-    aiStore.setProvider(s, req.params.provider, sid || null);
-    res.json(s);
-  });
-
-  app.delete("/ai-sessions/:id/providers/:provider", (req, res) => {
-    const s = aiStore.read(req.params.id);
-    if (!s) return res.status(404).json({ error: "ai-session not found" });
-    aiStore.setProvider(s, req.params.provider, null);
-    res.json(s);
+  // Fork an AiSession onto a different provider, seeded from the source.
+  app.post("/sessions/:id/fork", async (req, res, next) => {
+    try {
+      const { forkAiSession } = await import("../ai-sessions/fork.js");
+      const { targetProvider, destructive, cwd } = req.body ?? {};
+      if (!targetProvider) {
+        return res.status(400).json({ error: "targetProvider required" });
+      }
+      const result = await forkAiSession({
+        sourceId: req.params.id,
+        targetProvider,
+        destructive: !!destructive,
+        cwd,
+      });
+      res.json(result);
+    } catch (e) {
+      next(e);
+    }
   });
 
   app.use((err: any, _req: Request, res: Response, _next: express.NextFunction) => {

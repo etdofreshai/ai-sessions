@@ -3,7 +3,15 @@ import { join, basename } from "node:path";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import fg from "fast-glob";
-import type { Provider, SessionSummary, SessionDetail, SessionMessage, RunOptions, RunResult } from "./types.js";
+import { startRun } from "../runs/start.js";
+import type { RunHandle } from "../runs/types.js";
+import type {
+  Provider,
+  SessionSummary,
+  SessionDetail,
+  SessionMessage,
+  RunOptions,
+} from "./types.js";
 import { defaultYolo } from "./types.js";
 import { readJsonl, fileTimes } from "../sessions/jsonl.js";
 
@@ -60,30 +68,51 @@ export const opencodeProvider: Provider = {
     return { ...match, messages, messageCount: messages.length };
   },
 
-  async run(opts: RunOptions): Promise<RunResult> {
-    return new Promise((resolve, reject) => {
-      const yolo = opts.yolo ?? defaultYolo();
-      const args = ["run", opts.prompt];
-      if (opts.sessionId) args.push("--session", opts.sessionId);
-      if (yolo) args.push("--yolo");
-      const child = spawn("opencode", args, {
-        cwd: opts.cwd,
-        stdio: ["ignore", "pipe", "pipe"],
-        shell: process.platform === "win32",
-      });
-      let out = "";
-      let err = "";
-      child.stdout.on("data", (d) => {
-        const s = d.toString();
-        out += s;
-        opts.onChunk?.(s);
-      });
-      child.stderr.on("data", (d) => (err += d.toString()));
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code !== 0) reject(new Error(`opencode exited ${code}: ${err}`));
-        else resolve({ sessionId: opts.sessionId, output: out });
-      });
+  run(opts: RunOptions): RunHandle {
+    const yolo = opts.yolo ?? defaultYolo();
+    return startRun({
+      provider: "opencode",
+      prompt: opts.prompt,
+      sessionId: opts.sessionId,
+      cwd: opts.cwd,
+      yolo,
+      steerable: false,
+      body: async ({ emit, onAbort }) => {
+        const args = ["run", opts.prompt];
+        if (opts.sessionId) args.push("--session", opts.sessionId);
+        if (yolo) args.push("--yolo");
+
+        return new Promise<{ output: string; sessionId?: string }>((resolve, reject) => {
+          const child = spawn("opencode", args, {
+            cwd: opts.cwd,
+            stdio: ["ignore", "pipe", "pipe"],
+            shell: process.platform === "win32",
+          });
+          onAbort(() => {
+            try {
+              child.kill();
+            } catch {
+              /* ignore */
+            }
+          });
+          let out = "";
+          let err = "";
+          child.stdout.on("data", (d) => {
+            const s = d.toString();
+            out += s;
+            emit({ type: "text", text: s });
+          });
+          child.stderr.on("data", (d) => (err += d.toString()));
+          child.on("error", reject);
+          child.on("close", (code) => {
+            if (code !== 0 && code !== null) {
+              reject(new Error(`opencode exited ${code}: ${err}`));
+            } else {
+              resolve({ output: out, sessionId: opts.sessionId });
+            }
+          });
+        });
+      },
     });
   },
 };

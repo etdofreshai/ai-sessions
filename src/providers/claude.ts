@@ -2,7 +2,15 @@ import { homedir } from "node:os";
 import { join, basename } from "node:path";
 import { existsSync } from "node:fs";
 import fg from "fast-glob";
-import type { Provider, SessionSummary, SessionDetail, SessionMessage, RunOptions, RunResult } from "./types.js";
+import { startRun } from "../runs/start.js";
+import type { RunHandle } from "../runs/types.js";
+import type {
+  Provider,
+  SessionSummary,
+  SessionDetail,
+  SessionMessage,
+  RunOptions,
+} from "./types.js";
 import { defaultYolo } from "./types.js";
 import { readJsonl, fileTimes } from "../sessions/jsonl.js";
 
@@ -85,32 +93,113 @@ export const claudeProvider: Provider = {
     };
   },
 
-  async run(opts: RunOptions): Promise<RunResult> {
-    const { query } = await import("@anthropic-ai/claude-agent-sdk");
-    const chunks: string[] = [];
-    let sessionId: string | undefined = opts.sessionId;
+  run(opts: RunOptions): RunHandle {
     const yolo = opts.yolo ?? defaultYolo();
-    const stream = query({
+    return startRun({
+      provider: "claude",
       prompt: opts.prompt,
-      options: {
-        cwd: opts.cwd,
-        ...(yolo
-          ? {
-              permissionMode: "bypassPermissions" as const,
-              allowDangerouslySkipPermissions: true,
+      sessionId: opts.sessionId,
+      cwd: opts.cwd,
+      yolo,
+      steerable: true,
+      body: async ({ emit, onAbort, onSteer }) => {
+        const { query } = await import("@anthropic-ai/claude-agent-sdk");
+
+        // Build a streaming user-message iterable so we can push steers.
+        const pending: string[] = [opts.prompt];
+        const closeSignal = { closed: false };
+        type Resolver = () => void;
+        let pushResolve: Resolver | null = null;
+
+        async function* userStream(): AsyncGenerator<any, void, unknown> {
+          while (true) {
+            while (pending.length) {
+              const text = pending.shift()!;
+              yield {
+                type: "user",
+                message: { role: "user", content: text },
+                parent_tool_use_id: null,
+              };
             }
-          : {}),
-        ...(opts.sessionId ? { resume: opts.sessionId } : {}),
+            if (closeSignal.closed) return;
+            await new Promise<void>((r) => (pushResolve = r));
+          }
+        }
+
+        onSteer?.((input: string) => {
+          pending.push(input);
+          if (pushResolve) {
+            pushResolve();
+            pushResolve = null;
+          }
+        });
+
+        const stream = query({
+          prompt: userStream(),
+          options: {
+            cwd: opts.cwd,
+            ...(yolo
+              ? {
+                  permissionMode: "bypassPermissions" as const,
+                  allowDangerouslySkipPermissions: true,
+                }
+              : {}),
+            ...(opts.sessionId ? { resume: opts.sessionId } : {}),
+          },
+        });
+
+        onAbort(() => {
+          stream.interrupt().catch(() => {});
+          closeSignal.closed = true;
+          if (pushResolve) {
+            pushResolve();
+            pushResolve = null;
+          }
+        });
+
+        const chunks: string[] = [];
+        let sessionId: string | undefined = opts.sessionId;
+
+        for await (const msg of stream as AsyncIterable<any>) {
+          if (msg?.session_id && !sessionId) {
+            const sid: string = String(msg.session_id);
+            sessionId = sid;
+            emit({ type: "session_id", sessionId: sid });
+          }
+          if (msg?.type === "assistant" && msg?.message?.content) {
+            for (const block of msg.message.content as any[]) {
+              if (block?.type === "text" && block.text) {
+                chunks.push(block.text);
+                emit({ type: "text", text: block.text });
+              } else if (block?.type === "tool_use") {
+                emit({
+                  type: "tool_use",
+                  name: String(block.name ?? "unknown"),
+                  input: block.input,
+                });
+              } else if (block?.type === "tool_result") {
+                emit({
+                  type: "tool_result",
+                  ...(block.name ? { name: String(block.name) } : {}),
+                  output: block.content,
+                });
+              }
+            }
+          }
+          if (msg?.type === "result") {
+            // Result message arrived; signal end of input so the user-message
+            // generator returns and the SDK closes cleanly.
+            closeSignal.closed = true;
+            if (pushResolve) {
+              const r = pushResolve as Resolver;
+              pushResolve = null;
+              r();
+            }
+          }
+        }
+
+        return { output: chunks.join("\n"), sessionId };
       },
     });
-    for await (const msg of stream as AsyncIterable<any>) {
-      if (msg?.session_id && !sessionId) sessionId = msg.session_id;
-      if (msg?.type === "assistant" && msg?.message?.content) {
-        const text = flattenContent(msg.message.content);
-        chunks.push(text);
-        opts.onChunk?.(text);
-      }
-    }
-    return { sessionId, output: chunks.join("\n") };
   },
 };

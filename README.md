@@ -1,48 +1,81 @@
 # ai-sessions
 
-Thin TypeScript CLI + local HTTP API to call, manage, and view sessions across `claude`, `codex`, and `opencode`.
+Thin TypeScript CLI + local HTTP API to call, manage, and view sessions across `claude`, `codex`, and `opencode` — under one unified vocabulary.
 
-Inspired by [`etdofreshai/claude-code-server`](https://github.com/etdofreshai/claude-code-server).
+## Vocabulary
+
+- **Session** — a persistent conversation thread (Claude `session_id`, Codex `thread_id`, opencode session id).
+- **Run** — a single prompt → response cycle inside a session. New runs can `--session <id>` to continue.
+- **Event** — a streaming sub-step within a run: `session_id` · `text` · `tool_use` · `tool_result` · `error` · `end`.
 
 ## Install
 
 ```bash
 npm install
 npm run build
-npm link   # exposes `ai-sessions` and `ais`
+npm link   # exposes `ais` and `ai-sessions`
 ```
 
 ## CLI
 
 ```bash
-ais providers                       # list available providers
-ais list <provider>                 # list sessions for a provider
-ais view <provider> <session-id>    # print a session transcript
-ais run  <provider> "<prompt>"      # start a new session
-ais resume <provider> <session-id>  # continue an existing session (where supported)
-ais serve [--port 7878]             # start local HTTP API
-```
+ais providers                                  # detected providers
+ais list <provider> [--limit N]                # sessions
+ais view <provider> <session-id>               # transcript
+ais run  <provider> "<prompt>" [--session ID]  # new run (or continue session)
+                              [--cwd DIR] [--no-yolo] [--answer-only]
 
-Providers: `claude`, `codex`, `opencode`.
+ais runs ls                                    # recent runs from dataDir/runs
+ais runs show <run-id>                         # metadata + persisted events
+ais runs interrupt <run-id>                    # stop a live run
+ais runs steer <run-id> "<input>"              # inject mid-run user message (Claude)
+
+ais serve [--port 7878]                        # local HTTP API
+```
 
 ## HTTP API
 
 ```
+GET  /
+GET  /openapi.json                                 # OpenAPI 3.1
 GET  /providers
-GET  /providers/:provider/sessions
-GET  /providers/:provider/sessions/:id
-POST /providers/:provider/run        { prompt, sessionId? }
+GET  /providers/{provider}/sessions
+GET  /providers/{provider}/sessions/{id}
+
+POST /providers/{provider}/runs                    # SSE by default
+                                                   # ?stream=0 → JSON RunMetadata
+                                                   # ?answerOnly=1 → text/plain final answer
+GET  /providers/{provider}/runs                    # recent run ids
+GET  /providers/{provider}/runs/{runId}            # metadata + events (when terminal)
+POST /providers/{provider}/runs/{runId}/interrupt
+POST /providers/{provider}/runs/{runId}/steer      { input }   # 501 on codex/opencode
 ```
 
-## How it works
+POST body for runs:
+```json
+{ "prompt": "...", "sessionId": "...", "cwd": "...", "yolo": true }
+```
 
-- **claude / codex**: uses the official SDKs (`@anthropic-ai/claude-agent-sdk`, `@openai/codex-sdk`) to run prompts; reads on-disk session JSONL for list/view.
-- **opencode**: shells out to the `opencode` binary; reads on-disk storage for list/view.
+## Capabilities by provider
 
-Session storage paths (auto-detected, override with env vars):
+| Action | claude | codex | opencode |
+|---|---|---|---|
+| new session | ✓ | ✓ | ✓ |
+| resume (`--session`) | ✓ | ✓ | ✓ |
+| interrupt | ✓ (`Query.interrupt`) | best-effort (`AbortSignal`) | ✓ (kill child) |
+| steer | ✓ (streaming-input) | ✗ (501) | ✗ (501) |
 
-| Provider | Default path | Override |
+Codex steer is pending a switch from `@openai/codex-sdk` to direct `codex app-server` JSON-RPC.
+
+## Config
+
+`.env` is auto-loaded (Node `process.loadEnvFile()`).
+
+| Var | Default | Notes |
 |---|---|---|
-| claude   | `~/.claude/projects/**/*.jsonl` | `CLAUDE_HOME` |
-| codex    | `~/.codex/sessions/**/*.jsonl`  | `CODEX_HOME` |
-| opencode | `~/.local/share/opencode/**`    | `OPENCODE_HOME` |
+| `AI_SESSIONS_YOLO` | `1` | `0` disables bypass-permissions / sandbox |
+| `AI_SESSIONS_DATA_DIR` | `cwd` | Persistent state: `dataDir/runs/<id>.jsonl` |
+| `AI_SESSIONS_PORT` | `7878` | Default port for `serve` |
+| `CLAUDE_HOME` | `~/.claude` | |
+| `CODEX_HOME` | `~/.codex` | |
+| `OPENCODE_HOME` | `~/.local/share/opencode` | |

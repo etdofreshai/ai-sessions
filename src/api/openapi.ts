@@ -4,7 +4,7 @@ export const openapi = {
     title: "ai-sessions API",
     version: "0.1.0",
     description:
-      "Local API to call, manage, and view sessions across claude, codex, and opencode. Includes thin wrappers and SDK-mirror endpoints. YOLO (bypass permissions/sandbox) is on by default; disable with AI_SESSIONS_YOLO=0 or per-request `yolo: false`.",
+      "Local API to call, manage, and view sessions across claude, codex, and opencode. Unified vocabulary: a Session is a persistent thread; a Run is a single prompt → response cycle inside a session. YOLO (bypass permissions/sandbox) is on by default; disable with AI_SESSIONS_YOLO=0 or per-request `yolo: false`.",
   },
   servers: [{ url: "http://localhost:7878" }],
   paths: {
@@ -30,7 +30,12 @@ export const openapi = {
       get: {
         summary: "List sessions for a provider",
         parameters: [
-          { name: "provider", in: "path", required: true, schema: { type: "string", enum: ["claude", "codex", "opencode"] } },
+          {
+            name: "provider",
+            in: "path",
+            required: true,
+            schema: { type: "string", enum: ["claude", "codex", "opencode"] },
+          },
         ],
         responses: { "200": { description: "Array of SessionSummary" } },
       },
@@ -45,9 +50,30 @@ export const openapi = {
         responses: { "200": { description: "SessionDetail" }, "404": { description: "Not found" } },
       },
     },
-    "/providers/{provider}/run": {
+    "/providers/{provider}/runs": {
+      get: {
+        summary: "List recent run ids (from dataDir/runs)",
+        responses: { "200": { description: "Array of { runId }" } },
+      },
       post: {
-        summary: "Run a prompt against any provider (thin)",
+        summary: "Start a new run (prompt → response cycle)",
+        description:
+          "Streams Server-Sent Events by default. Pass `?stream=0` for a sync JSON response, or `?answerOnly=1` for plain-text final output only. To continue an existing session, pass `sessionId`.",
+        parameters: [
+          { name: "provider", in: "path", required: true, schema: { type: "string" } },
+          {
+            name: "stream",
+            in: "query",
+            schema: { type: "string" },
+            description: "Set to '0' to disable SSE.",
+          },
+          {
+            name: "answerOnly",
+            in: "query",
+            schema: { type: "string" },
+            description: "Set to '1' for plain-text final-answer-only response.",
+          },
+        ],
         requestBody: {
           required: true,
           content: {
@@ -59,69 +85,7 @@ export const openapi = {
                   prompt: { type: "string" },
                   sessionId: { type: "string" },
                   cwd: { type: "string" },
-                  yolo: { type: "boolean", description: "Default true" },
-                },
-              },
-            },
-          },
-        },
-        responses: { "200": { description: "{ sessionId, output }" } },
-      },
-    },
-
-    "/claude/query": {
-      post: {
-        summary: "Mirror of @anthropic-ai/claude-agent-sdk `query({ prompt, options })`",
-        description: "Returns the full message array. Pass ?stream=1 for SSE.",
-        parameters: [
-          { name: "stream", in: "query", schema: { type: "string" }, description: "Set to 1 for SSE" },
-        ],
-        requestBody: {
-          required: true,
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                required: ["prompt"],
-                properties: {
-                  prompt: { type: "string" },
-                  options: {
-                    type: "object",
-                    additionalProperties: true,
-                    description:
-                      "Forwarded to claude-agent-sdk. Common keys: cwd, resume, permissionMode ('default'|'acceptEdits'|'plan'|'bypassPermissions'), model, allowedTools.",
-                  },
-                },
-              },
-            },
-          },
-        },
-        responses: {
-          "200": {
-            description: "Array of SDK messages (or SSE stream when ?stream=1)",
-          },
-        },
-      },
-    },
-
-    "/codex/threads": {
-      post: {
-        summary: "Mirror of `codex.startThread(options)` / `codex.resumeThread(id, options)`",
-        requestBody: {
-          required: false,
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                properties: {
-                  resumeId: { type: "string", description: "Resume an existing thread by id" },
-                  yolo: { type: "boolean" },
-                  threadOptions: {
-                    type: "object",
-                    description:
-                      "Codex SDK ThreadOptions. Keys: model, sandboxMode ('read-only'|'workspace-write'|'danger-full-access'), workingDirectory, skipGitRepoCheck, modelReasoningEffort, networkAccessEnabled, webSearchMode, webSearchEnabled, approvalPolicy ('never'|'on-request'|'on-failure'|'untrusted'), additionalDirectories.",
-                    additionalProperties: true,
-                  },
+                  yolo: { type: "boolean", description: "Default true." },
                 },
               },
             },
@@ -130,15 +94,44 @@ export const openapi = {
         responses: {
           "200": {
             description:
-              "{ threadId, idAssigned } — `threadId` is a temp UUID until the first run completes; `idAssigned` indicates whether it's the canonical Codex thread id.",
+              "SSE stream of RunEvents (default), or RunMetadata JSON, or plain-text answer.",
           },
         },
       },
     },
-    "/codex/threads/{id}/run": {
+    "/providers/{provider}/runs/{runId}": {
+      get: {
+        summary: "Get a run's metadata (and persisted events if not live)",
+        parameters: [
+          { name: "provider", in: "path", required: true, schema: { type: "string" } },
+          { name: "runId", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "RunMetadata + events (when terminal)" },
+          "404": { description: "Not found" },
+        },
+      },
+    },
+    "/providers/{provider}/runs/{runId}/interrupt": {
       post: {
-        summary: "Mirror of `thread.run(input, turnOptions)`",
-        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        summary: "Interrupt a live run",
+        parameters: [
+          { name: "provider", in: "path", required: true, schema: { type: "string" } },
+          { name: "runId", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "{ ok: true }" },
+          "404": { description: "Run not active" },
+        },
+      },
+    },
+    "/providers/{provider}/runs/{runId}/steer": {
+      post: {
+        summary: "Inject a mid-run user message (Claude only today)",
+        parameters: [
+          { name: "provider", in: "path", required: true, schema: { type: "string" } },
+          { name: "runId", in: "path", required: true, schema: { type: "string" } },
+        ],
         requestBody: {
           required: true,
           content: {
@@ -146,27 +139,15 @@ export const openapi = {
               schema: {
                 type: "object",
                 required: ["input"],
-                properties: {
-                  input: {
-                    description: "Either a string or an array of UserInput ({type:'text'|'local_image', ...}).",
-                    oneOf: [{ type: "string" }, { type: "array", items: { type: "object" } }],
-                  },
-                  turnOptions: {
-                    type: "object",
-                    description: "TurnOptions: only `outputSchema` and `signal` are supported by the SDK.",
-                    properties: {
-                      outputSchema: { type: "object", additionalProperties: true },
-                    },
-                  },
-                },
+                properties: { input: { type: "string" } },
               },
             },
           },
         },
         responses: {
-          "200": {
-            description: "Turn { items, finalResponse, usage } plus { threadId } for canonical id after first run.",
-          },
+          "200": { description: "{ ok: true }" },
+          "404": { description: "Run not active" },
+          "501": { description: "Provider does not support steering" },
         },
       },
     },

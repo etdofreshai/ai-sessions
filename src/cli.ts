@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { getProvider, listProviderNames, providers } from "./providers/index.js";
 import { startServer } from "./api/server.js";
 import { port as defaultPort } from "./config.js";
+import { getLive, listRunIds, loadFromDisk } from "./runs/registry.js";
 
 const program = new Command();
 program
@@ -59,35 +60,96 @@ program
 
 program
   .command("run <provider> <prompt>")
-  .description("Run a new prompt in a fresh session")
+  .description("Start a new run. Pass --session to continue an existing session.")
+  .option("-s, --session <id>", "continue an existing session")
   .option("-c, --cwd <dir>", "working directory")
   .option("--no-yolo", "disable bypass-permissions / sandbox bypass")
-  .action(async (provider: string, prompt: string, opts: { cwd?: string; yolo?: boolean }) => {
-    const result = await getProvider(provider).run({
-      prompt,
-      cwd: opts.cwd,
-      yolo: opts.yolo,
-      onChunk: (c) => process.stdout.write(c),
-    });
-    process.stdout.write("\n");
-    if (result.sessionId) console.error(`session: ${result.sessionId}`);
+  .option("--answer-only", "print just the final answer, suppressing intermediate stream")
+  .action(
+    async (
+      provider: string,
+      prompt: string,
+      opts: { session?: string; cwd?: string; yolo?: boolean; answerOnly?: boolean }
+    ) => {
+      const handle = getProvider(provider).run({
+        prompt,
+        sessionId: opts.session,
+        cwd: opts.cwd,
+        yolo: opts.yolo,
+      });
+      if (!opts.answerOnly) {
+        for await (const ev of handle.events) {
+          if (ev.type === "text") process.stdout.write(ev.text);
+          else if (ev.type === "tool_use")
+            process.stderr.write(`\n[tool_use ${ev.name}]\n`);
+          else if (ev.type === "error")
+            process.stderr.write(`\n[error] ${ev.message}\n`);
+        }
+        process.stdout.write("\n");
+      }
+      const meta = await handle.done;
+      if (opts.answerOnly) process.stdout.write((meta.output ?? "") + "\n");
+      console.error(`run: ${meta.runId}  status: ${meta.status}`);
+      if (meta.sessionId) console.error(`session: ${meta.sessionId}`);
+    }
+  );
+
+const runs = program.command("runs").description("Manage runs");
+
+runs
+  .command("ls")
+  .description("List recent run ids from dataDir/runs")
+  .option("-l, --limit <n>", "limit results", (v) => parseInt(v, 10), 20)
+  .action((opts: { limit: number }) => {
+    for (const id of listRunIds(opts.limit)) {
+      const meta = loadFromDisk(id);
+      const live = getLive(id);
+      const status = live ? "live" : meta?.status ?? "?";
+      console.log(`${id}  ${status}  ${meta?.provider ?? ""}`);
+    }
   });
 
-program
-  .command("resume <provider> <id> <prompt>")
-  .description("Resume an existing session with a new prompt")
-  .option("-c, --cwd <dir>", "working directory")
-  .option("--no-yolo", "disable bypass-permissions / sandbox bypass")
-  .action(async (provider: string, id: string, prompt: string, opts: { cwd?: string; yolo?: boolean }) => {
-    const result = await getProvider(provider).run({
-      prompt,
-      sessionId: id,
-      cwd: opts.cwd,
-      yolo: opts.yolo,
-      onChunk: (c) => process.stdout.write(c),
-    });
-    process.stdout.write("\n");
-    if (result.sessionId) console.error(`session: ${result.sessionId}`);
+runs
+  .command("show <runId>")
+  .description("Show a run's metadata + events")
+  .action((runId: string) => {
+    const meta = loadFromDisk(runId);
+    if (!meta) {
+      console.error(`run not found: ${runId}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify(meta, null, 2));
+  });
+
+runs
+  .command("interrupt <runId>")
+  .description("Interrupt a live run")
+  .action(async (runId: string) => {
+    const handle = getLive(runId);
+    if (!handle) {
+      console.error(`run not active in this process: ${runId}`);
+      console.error("(use POST /providers/<p>/runs/<id>/interrupt against the server)");
+      process.exit(1);
+    }
+    await handle.interrupt();
+    console.log("interrupted");
+  });
+
+runs
+  .command("steer <runId> <input>")
+  .description("Inject a mid-run user message (Claude only today)")
+  .action(async (runId: string, input: string) => {
+    const handle = getLive(runId);
+    if (!handle) {
+      console.error(`run not active in this process: ${runId}`);
+      process.exit(1);
+    }
+    if (!handle.steer) {
+      console.error(`steer not supported by provider ${handle.meta.provider}`);
+      process.exit(1);
+    }
+    await handle.steer(input);
+    console.log("steered");
   });
 
 program

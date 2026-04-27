@@ -2,7 +2,15 @@ import { homedir } from "node:os";
 import { join, basename } from "node:path";
 import { existsSync } from "node:fs";
 import fg from "fast-glob";
-import type { Provider, SessionSummary, SessionDetail, SessionMessage, RunOptions, RunResult } from "./types.js";
+import { startRun } from "../runs/start.js";
+import type { RunHandle } from "../runs/types.js";
+import type {
+  Provider,
+  SessionSummary,
+  SessionDetail,
+  SessionMessage,
+  RunOptions,
+} from "./types.js";
 import { defaultYolo } from "./types.js";
 import { readJsonl, fileTimes } from "../sessions/jsonl.js";
 
@@ -28,7 +36,6 @@ function flattenContent(content: unknown): string {
 }
 
 function deriveId(path: string): string {
-  // rollout files look like rollout-2026-04-27T12-34-56-<id>.jsonl
   const base = basename(path, ".jsonl");
   const idx = base.lastIndexOf("-");
   return idx > 0 ? base.slice(idx + 1) : base;
@@ -88,26 +95,46 @@ export const codexProvider: Provider = {
     };
   },
 
-  async run(opts: RunOptions): Promise<RunResult> {
-    const { Codex } = await import("@openai/codex-sdk");
+  // NOTE: still using @openai/codex-sdk for now. Steer is unsupported on this
+  // path; interrupt is best-effort via TurnOptions.signal. A follow-up commit
+  // replaces this with direct `codex app-server` JSON-RPC for full feature
+  // parity (steer + clean interrupt).
+  run(opts: RunOptions): RunHandle {
     const yolo = opts.yolo ?? defaultYolo();
-    const codex = new Codex();
-    const threadOptions = {
-      ...(opts.cwd ? { workingDirectory: opts.cwd } : {}),
-      ...(yolo
-        ? {
-            sandboxMode: "danger-full-access" as const,
-            approvalPolicy: "never" as const,
-            skipGitRepoCheck: true,
-          }
-        : {}),
-    };
-    const thread = opts.sessionId
-      ? codex.resumeThread(opts.sessionId, threadOptions)
-      : codex.startThread(threadOptions);
-    const turn = await thread.run(opts.prompt);
-    const output = turn.finalResponse;
-    if (output && opts.onChunk) opts.onChunk(output);
-    return { sessionId: thread.id ?? opts.sessionId, output };
+    return startRun({
+      provider: "codex",
+      prompt: opts.prompt,
+      sessionId: opts.sessionId,
+      cwd: opts.cwd,
+      yolo,
+      steerable: false,
+      body: async ({ emit, onAbort }) => {
+        const { Codex } = await import("@openai/codex-sdk");
+        const codex = new Codex();
+        const threadOptions = {
+          ...(opts.cwd ? { workingDirectory: opts.cwd } : {}),
+          ...(yolo
+            ? {
+                sandboxMode: "danger-full-access" as const,
+                approvalPolicy: "never" as const,
+                skipGitRepoCheck: true,
+              }
+            : {}),
+        };
+        const thread = opts.sessionId
+          ? codex.resumeThread(opts.sessionId, threadOptions)
+          : codex.startThread(threadOptions);
+
+        const ac = new AbortController();
+        onAbort(() => ac.abort());
+
+        const turn = await thread.run(opts.prompt, { signal: ac.signal });
+        const output = turn.finalResponse;
+        const sessionId = thread.id ?? opts.sessionId ?? undefined;
+        if (sessionId) emit({ type: "session_id", sessionId });
+        if (output) emit({ type: "text", text: output });
+        return { output, sessionId };
+      },
+    });
   },
 };

@@ -1,3 +1,5 @@
+import type { RunHandle } from "../runs/types.js";
+
 export interface SessionSummary {
   id: string;
   provider: string;
@@ -25,7 +27,6 @@ export interface RunOptions {
   sessionId?: string;
   cwd?: string;
   yolo?: boolean;
-  onChunk?: (chunk: string) => void;
 }
 
 export function defaultYolo(): boolean {
@@ -34,15 +35,12 @@ export function defaultYolo(): boolean {
   return !["0", "false", "no", "off"].includes(v.toLowerCase());
 }
 
-export interface RunResult {
-  sessionId?: string;
-  output: string;
-}
-
 export interface Provider {
   name: string;
   isAvailable(): Promise<boolean>;
   listSessions(): Promise<SessionSummary[]>;
   getSession(id: string): Promise<SessionDetail>;
-  run(opts: RunOptions): Promise<RunResult>;
+  // Returns immediately with a RunHandle; events stream via handle.events,
+  // final state via handle.done.
+  run(opts: RunOptions): RunHandle;
 }

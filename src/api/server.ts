@@ -3,28 +3,13 @@ import type { Request, Response } from "express";
 import { getProvider, listProviderNames, providers } from "../providers/index.js";
 import { defaultYolo } from "../providers/types.js";
 import { dataDir } from "../config.js";
+import {
+  getLive,
+  listRunIds,
+  loadEvents,
+  loadFromDisk,
+} from "../runs/registry.js";
 import { openapi } from "./openapi.js";
-
-// In-memory Codex thread registry — keyed by threadId (or temporary key until id is assigned).
-const codexThreads = new Map<string, any>();
-let codexClient: any | null = null;
-
-async function getCodexClient() {
-  if (codexClient) return codexClient;
-  const { Codex } = await import("@openai/codex-sdk");
-  codexClient = new Codex();
-  return codexClient;
-}
-
-function defaultThreadOptions(yolo: boolean) {
-  return yolo
-    ? {
-        sandboxMode: "danger-full-access" as const,
-        approvalPolicy: "never" as const,
-        skipGitRepoCheck: true,
-      }
-    : {};
-}
 
 export function createApp() {
   const app = express();
@@ -43,7 +28,7 @@ export function createApp() {
 
   app.get("/openapi.json", (_req, res) => res.json(openapi));
 
-  // Thin / unified routes
+  // Providers + sessions (unchanged shape).
   app.get("/providers", async (_req, res) => {
     const out = await Promise.all(
       listProviderNames().map(async (name) => ({
@@ -56,7 +41,7 @@ export function createApp() {
 
   app.get("/providers/:provider/sessions", async (req, res, next) => {
     try {
-      res.json(await getProvider(req.params.provider).listSessions());
+      res.json(await getProvider(String(req.params.provider)).listSessions());
     } catch (e) {
       next(e);
     }
@@ -64,96 +49,88 @@ export function createApp() {
 
   app.get("/providers/:provider/sessions/:id", async (req, res, next) => {
     try {
-      res.json(await getProvider(req.params.provider).getSession(req.params.id));
+      res.json(await getProvider(String(req.params.provider)).getSession(req.params.id));
     } catch (e) {
       next(e);
     }
   });
 
-  app.post("/providers/:provider/run", async (req, res, next) => {
+  // Unified runs API.
+  app.post("/providers/:provider/runs", async (req: Request, res: Response, next) => {
     try {
       const { prompt, sessionId, cwd, yolo } = req.body ?? {};
       if (!prompt) return res.status(400).json({ error: "prompt required" });
-      const result = await getProvider(req.params.provider).run({ prompt, sessionId, cwd, yolo });
-      res.json(result);
-    } catch (e) {
-      next(e);
-    }
-  });
 
-  // SDK-mirror: Claude
-  app.post("/claude/query", async (req: Request, res: Response, next) => {
-    try {
-      const { prompt, options } = req.body ?? {};
-      if (!prompt) return res.status(400).json({ error: "prompt required" });
-      const yolo = options?.yolo ?? defaultYolo();
-      const merged = {
-        ...(yolo
-          ? {
-              permissionMode: "bypassPermissions" as const,
-              allowDangerouslySkipPermissions: true,
-            }
-          : {}),
-        ...options,
-      };
-      const { query } = await import("@anthropic-ai/claude-agent-sdk");
-      const stream = query({ prompt, options: merged }) as AsyncIterable<any>;
+      const handle = getProvider(String(req.params.provider)).run({
+        prompt,
+        sessionId,
+        cwd,
+        yolo,
+      });
 
-      if (req.query.stream === "1") {
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        for await (const msg of stream) {
-          res.write(`data: ${JSON.stringify(msg)}\n\n`);
+      const answerOnly = String(req.query.answerOnly ?? "") === "1";
+      const noStream = String(req.query.stream ?? "") === "0" || answerOnly;
+
+      if (noStream) {
+        const meta = await handle.done;
+        if (answerOnly) {
+          res.type("text/plain").send(meta.output ?? "");
+        } else {
+          res.json(meta);
         }
-        res.write("event: done\ndata: {}\n\n");
-        res.end();
         return;
       }
 
-      const messages: any[] = [];
-      for await (const msg of stream) messages.push(msg);
-      res.json({ messages });
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  // SDK-mirror: Codex
-  app.post("/codex/threads", async (req, res, next) => {
-    try {
-      const { resumeId, threadOptions } = req.body ?? {};
-      const yolo = req.body?.yolo ?? defaultYolo();
-      const codex = await getCodexClient();
-      const merged = { ...defaultThreadOptions(yolo), ...threadOptions };
-      const thread = resumeId
-        ? codex.resumeThread(resumeId, merged)
-        : codex.startThread(merged);
-      // thread.id is null until the first turn starts. Use resumeId or a temp key.
-      const key = thread.id ?? resumeId ?? crypto.randomUUID();
-      codexThreads.set(key, thread);
-      res.json({ threadId: key, idAssigned: thread.id != null });
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  app.post("/codex/threads/:id/run", async (req, res, next) => {
-    try {
-      const { input, turnOptions } = req.body ?? {};
-      if (!input) return res.status(400).json({ error: "input required" });
-      const thread = codexThreads.get(req.params.id);
-      if (!thread) return res.status(404).json({ error: "thread not found" });
-      const turn = await thread.run(input, turnOptions);
-      // After first run, thread.id becomes available — re-key under canonical id.
-      if (thread.id && thread.id !== req.params.id) {
-        codexThreads.delete(req.params.id);
-        codexThreads.set(thread.id, thread);
+      // SSE by default.
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.write(`event: meta\ndata: ${JSON.stringify(handle.meta)}\n\n`);
+      for await (const ev of handle.events) {
+        res.write(`data: ${JSON.stringify(ev)}\n\n`);
       }
-      res.json({ ...turn, threadId: thread.id ?? req.params.id });
+      const final = await handle.done;
+      res.write(`event: done\ndata: ${JSON.stringify(final)}\n\n`);
+      res.end();
     } catch (e) {
       next(e);
     }
+  });
+
+  app.get("/providers/:provider/runs", (_req, res) => {
+    res.json(listRunIds().map((id) => ({ runId: id })));
+  });
+
+  app.get("/providers/:provider/runs/:runId", (req, res) => {
+    const live = getLive(req.params.runId);
+    if (live) {
+      res.json({ ...live.meta, live: true });
+      return;
+    }
+    const meta = loadFromDisk(req.params.runId);
+    if (!meta) return res.status(404).json({ error: "run not found" });
+    res.json({ ...meta, live: false, events: loadEvents(req.params.runId) });
+  });
+
+  app.post("/providers/:provider/runs/:runId/interrupt", async (req, res) => {
+    const live = getLive(req.params.runId);
+    if (!live) return res.status(404).json({ error: "run not active" });
+    await live.interrupt();
+    res.json({ ok: true });
+  });
+
+  app.post("/providers/:provider/runs/:runId/steer", async (req, res) => {
+    const live = getLive(req.params.runId);
+    if (!live) return res.status(404).json({ error: "run not active" });
+    if (!live.steer) {
+      return res
+        .status(501)
+        .json({ error: `steer not supported by provider ${String(req.params.provider)}` });
+    }
+    const { input } = req.body ?? {};
+    if (!input) return res.status(400).json({ error: "input required" });
+    await live.steer(input);
+    res.json({ ok: true });
   });
 
   app.use((err: any, _req: Request, res: Response, _next: express.NextFunction) => {

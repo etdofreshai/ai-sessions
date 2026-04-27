@@ -29,8 +29,10 @@ export function newAiSessionId(): string {
 // recently-used binding. Returns null if the entry can't be salvaged.
 function migrate(raw: any): AiSession | null {
   if (!raw || typeof raw !== "object") return null;
-  if (typeof raw.provider === "string" && typeof raw.sessionId === "string") {
-    return raw as AiSession; // already new shape
+  // New shape: provider is required, sessionId is optional (empty until first
+  // run completes for sessions created via the Telegram "+ new" flow).
+  if (typeof raw.provider === "string" && typeof raw.id === "string") {
+    return raw as AiSession;
   }
   if (raw.providers && typeof raw.providers === "object") {
     const entries = Object.entries(raw.providers as Record<string, any>);
@@ -113,7 +115,7 @@ export function findByTelegramChat(chatId: number): AiSession | null {
 
 export function create(args: {
   provider: string;
-  sessionId: string;
+  sessionId?: string;
   name?: string | null;
   model?: string;
 }): AiSession {

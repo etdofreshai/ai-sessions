@@ -35,7 +35,7 @@ export interface ForkResult {
   id: string;
   name: string | null;
   provider: string;
-  sessionId: string;
+  sessionId?: string;
   createdAt: string;
   updatedAt: string;
   seedMode: "replay" | "summary";
@@ -56,6 +56,11 @@ export async function forkAiSession(args: {
     );
   }
 
+  if (!source.sessionId) {
+    throw new Error(
+      `source AiSession ${source.id} has no provider sessionId yet (no runs have completed); nothing to fork`
+    );
+  }
   const sourceProvider = getProvider(source.provider);
   const detail = await sourceProvider.getSession(source.sessionId);
   const transcript = renderTranscript(detail.messages);

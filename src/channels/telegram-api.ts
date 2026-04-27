@@ -99,4 +99,14 @@ export class TelegramApi {
   answerCallbackQuery(opts: { callback_query_id: string; text?: string; show_alert?: boolean }) {
     return this.call("answerCallbackQuery", opts);
   }
+
+  // Telegram shows the indicator for ~5s then auto-clears; resend every <5s
+  // to keep it visible during long-running operations.
+  sendChatAction(opts: {
+    chat_id: number;
+    action: "typing" | "upload_photo" | "record_video" | "upload_video" | "record_voice" | "upload_voice" | "upload_document" | "find_location" | "record_video_note" | "upload_video_note";
+    message_thread_id?: number;
+  }) {
+    return this.call("sendChatAction", opts);
+  }
 }

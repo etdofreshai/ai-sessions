@@ -1,48 +1,58 @@
 # ai-sessions
 
-Thin TypeScript CLI + local HTTP API to call, manage, and view sessions across `claude`, `codex`, and `opencode`.
+Thin Python CLI + FastAPI HTTP API to call, manage, and view sessions across `claude`, `codex`, and `opencode`.
 
-Inspired by [`etdofreshai/claude-code-server`](https://github.com/etdofreshai/claude-code-server).
+Why Python: the Codex Python SDK exposes `turn.steer()` and `turn.interrupt()` (the TS SDK does not), so going Python unlocks full feature parity with the underlying agents.
 
 ## Install
 
+Requires **Python 3.12+** (the Codex SDK `codex-app-server-sdk` needs it).
+
 ```bash
-npm install
-npm run build
-npm link   # exposes `ai-sessions` and `ais`
+python3.12 -m venv .venv && . .venv/bin/activate    # or .venv\Scripts\activate on Windows
+pip install -e .
 ```
 
 ## CLI
 
 ```bash
-ais providers                       # list available providers
-ais list <provider>                 # list sessions for a provider
-ais view <provider> <session-id>    # print a session transcript
-ais run  <provider> "<prompt>"      # start a new session
-ais resume <provider> <session-id>  # continue an existing session (where supported)
-ais serve [--port 7878]             # start local HTTP API
+ais providers                     # which providers are detected
+ais list <provider> [--limit N]   # list sessions
+ais view <provider> <id>          # print transcript
+ais run  <provider> "<prompt>"    # new session
+ais resume <provider> <id> "..."  # continue an existing session
+ais serve [--port 7878]           # start the HTTP API
 ```
 
-Providers: `claude`, `codex`, `opencode`.
+Providers: `claude`, `codex`, `opencode`. YOLO (bypass permissions/sandbox) is on by default — disable per-call with `--no-yolo` or globally via `AI_SESSIONS_YOLO=0`.
 
 ## HTTP API
 
+FastAPI auto-generates docs:
+- `GET /openapi.json` — OpenAPI 3.1
+- `GET /docs` — Swagger UI
+- `GET /redoc` — ReDoc
+
+Routes (v0):
 ```
+GET  /
 GET  /providers
-GET  /providers/:provider/sessions
-GET  /providers/:provider/sessions/:id
-POST /providers/:provider/run        { prompt, sessionId? }
+GET  /providers/{provider}/sessions
+GET  /providers/{provider}/sessions/{id}
+POST /providers/{provider}/run        { prompt, sessionId?, cwd?, yolo? }
 ```
 
-## How it works
+Provider-specific SDK-mirror routes (steer/interrupt) coming next.
 
-- **claude / codex**: uses the official SDKs (`@anthropic-ai/claude-agent-sdk`, `@openai/codex-sdk`) to run prompts; reads on-disk session JSONL for list/view.
-- **opencode**: shells out to the `opencode` binary; reads on-disk storage for list/view.
+## Config
 
-Session storage paths (auto-detected, override with env vars):
+Loaded from `.env` automatically.
 
-| Provider | Default path | Override |
+| Var | Default | Notes |
 |---|---|---|
-| claude   | `~/.claude/projects/**/*.jsonl` | `CLAUDE_HOME` |
-| codex    | `~/.codex/sessions/**/*.jsonl`  | `CODEX_HOME` |
-| opencode | `~/.local/share/opencode/**`    | `OPENCODE_HOME` |
+| `AI_SESSIONS_YOLO` | `1` | `0` disables bypass-permissions / sandbox |
+| `AI_SESSIONS_DATA_DIR` | `cwd` | Persistent state dir (use `/app/data` in Docker) |
+| `AI_SESSIONS_PORT` | `7878` | Default port for `serve` |
+| `CLAUDE_HOME` | `~/.claude` | Override Claude session storage path |
+| `CODEX_HOME` | `~/.codex` | Override Codex session storage path |
+| `OPENCODE_HOME` | `~/.local/share/opencode` | Override opencode storage path |

@@ -27,6 +27,12 @@ export interface RunOptions {
   sessionId?: string;
   cwd?: string;
   yolo?: boolean;
+  // If true, this run is created by ai-sessions internals (e.g. the AiSession
+  // naming call) and should NOT itself be auto-mapped to an AiSession.
+  internal?: boolean;
+  // Pre-resolved AiSession id (from `--as`). If set, the run is attributed to
+  // it on completion without further lookup.
+  aiSessionId?: string;
 }
 
 export function defaultYolo(): boolean {

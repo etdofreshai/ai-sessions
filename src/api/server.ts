@@ -9,6 +9,7 @@ import {
   loadEvents,
   loadFromDisk,
 } from "../runs/registry.js";
+import * as aiStore from "../ai-sessions/store.js";
 import { openapi } from "./openapi.js";
 
 export function createApp() {
@@ -58,12 +59,13 @@ export function createApp() {
   // Unified runs API.
   app.post("/providers/:provider/runs", async (req: Request, res: Response, next) => {
     try {
-      const { prompt, sessionId, cwd, yolo } = req.body ?? {};
+      const { prompt, sessionId, aiSessionId, cwd, yolo } = req.body ?? {};
       if (!prompt) return res.status(400).json({ error: "prompt required" });
 
       const handle = getProvider(String(req.params.provider)).run({
         prompt,
         sessionId,
+        aiSessionId,
         cwd,
         yolo,
       });
@@ -130,6 +132,31 @@ export function createApp() {
     const { input } = req.body ?? {};
     if (!input) return res.status(400).json({ error: "input required" });
     await live.steer(input);
+    res.json({ ok: true });
+  });
+
+  // AiSession CRUD.
+  app.get("/ai-sessions", (_req, res) => {
+    res.json(aiStore.list());
+  });
+
+  app.get("/ai-sessions/:id", (req, res) => {
+    const s = aiStore.read(req.params.id);
+    if (!s) return res.status(404).json({ error: "ai-session not found" });
+    res.json(s);
+  });
+
+  app.patch("/ai-sessions/:id", (req, res) => {
+    const s = aiStore.read(req.params.id);
+    if (!s) return res.status(404).json({ error: "ai-session not found" });
+    if (typeof req.body?.name === "string") s.name = req.body.name;
+    aiStore.write(s);
+    res.json(s);
+  });
+
+  app.delete("/ai-sessions/:id", (req, res) => {
+    const ok = aiStore.remove(req.params.id);
+    if (!ok) return res.status(404).json({ error: "ai-session not found" });
     res.json({ ok: true });
   });
 

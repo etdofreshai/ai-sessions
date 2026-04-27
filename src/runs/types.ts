@@ -17,10 +17,12 @@ export interface RunMetadata {
   runId: string;
   provider: string;
   sessionId?: string;
+  aiSessionId?: string;
   status: RunStatus;
   prompt: string;
   cwd?: string;
   yolo: boolean;
+  internal?: boolean;
   createdAt: string;
   endedAt?: string;
   output?: string;

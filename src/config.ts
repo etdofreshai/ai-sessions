@@ -22,3 +22,7 @@ export function port(): number {
   const v = parseInt(process.env.AI_SESSIONS_PORT ?? "", 10);
   return Number.isFinite(v) ? v : 7878;
 }
+
+export function defaultAgent(): string {
+  return process.env.AI_SESSIONS_DEFAULT_AGENT || "claude";
+}

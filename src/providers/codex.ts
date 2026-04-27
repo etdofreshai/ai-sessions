@@ -3,6 +3,7 @@ import { join, basename } from "node:path";
 import { existsSync } from "node:fs";
 import fg from "fast-glob";
 import { startRun } from "../runs/start.js";
+import { planAiSessionResolution } from "../ai-sessions/finalize.js";
 import type { RunHandle } from "../runs/types.js";
 import type {
   Provider,
@@ -100,12 +101,23 @@ export const codexProvider: Provider = {
   // clean interrupt that the npm SDK doesn't expose.
   run(opts: RunOptions): RunHandle {
     const yolo = opts.yolo ?? defaultYolo();
-    return startRun({
+    const plan = planAiSessionResolution({
       provider: "codex",
       prompt: opts.prompt,
       sessionId: opts.sessionId,
+      asId: opts.aiSessionId,
+      internal: opts.internal,
+    });
+    const effectiveSessionId = plan.effectiveProviderSessionId;
+    return startRun({
+      provider: "codex",
+      prompt: opts.prompt,
+      sessionId: effectiveSessionId,
       cwd: opts.cwd,
       yolo,
+      internal: opts.internal,
+      aiSessionId: plan.preResolvedAiSessionId,
+      onFinalize: plan.attachToMeta,
       steerable: true,
       body: async ({ emit, onAbort, onSteer }) => {
         const client = new CodexAppServer({ cwd: opts.cwd });
@@ -125,15 +137,15 @@ export const codexProvider: Provider = {
             threadParams.approvalPolicy = "never";
           }
 
-          const threadResult: any = opts.sessionId
+          const threadResult: any = effectiveSessionId
             ? await client.request("thread/resume", {
-                threadId: opts.sessionId,
+                threadId: effectiveSessionId,
                 ...threadParams,
               })
             : await client.request("thread/start", threadParams);
 
           const threadId: string =
-            threadResult?.thread?.id ?? opts.sessionId ?? "";
+            threadResult?.thread?.id ?? effectiveSessionId ?? "";
           if (threadId) emit({ type: "session_id", sessionId: threadId });
 
           // State across notifications for this turn.

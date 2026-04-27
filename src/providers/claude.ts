@@ -3,6 +3,7 @@ import { join, basename } from "node:path";
 import { existsSync } from "node:fs";
 import fg from "fast-glob";
 import { startRun } from "../runs/start.js";
+import { planAiSessionResolution } from "../ai-sessions/finalize.js";
 import type { RunHandle } from "../runs/types.js";
 import type {
   Provider,
@@ -95,12 +96,23 @@ export const claudeProvider: Provider = {
 
   run(opts: RunOptions): RunHandle {
     const yolo = opts.yolo ?? defaultYolo();
-    return startRun({
+    const plan = planAiSessionResolution({
       provider: "claude",
       prompt: opts.prompt,
       sessionId: opts.sessionId,
+      asId: opts.aiSessionId,
+      internal: opts.internal,
+    });
+    const effectiveSessionId = plan.effectiveProviderSessionId;
+    return startRun({
+      provider: "claude",
+      prompt: opts.prompt,
+      sessionId: effectiveSessionId,
       cwd: opts.cwd,
       yolo,
+      internal: opts.internal,
+      aiSessionId: plan.preResolvedAiSessionId,
+      onFinalize: plan.attachToMeta,
       steerable: true,
       body: async ({ emit, onAbort, onSteer }) => {
         const { query } = await import("@anthropic-ai/claude-agent-sdk");
@@ -144,7 +156,7 @@ export const claudeProvider: Provider = {
                   allowDangerouslySkipPermissions: true,
                 }
               : {}),
-            ...(opts.sessionId ? { resume: opts.sessionId } : {}),
+            ...(effectiveSessionId ? { resume: effectiveSessionId } : {}),
           },
         });
 
@@ -158,7 +170,7 @@ export const claudeProvider: Provider = {
         });
 
         const chunks: string[] = [];
-        let sessionId: string | undefined = opts.sessionId;
+        let sessionId: string | undefined = effectiveSessionId;
 
         for await (const msg of stream as AsyncIterable<any>) {
           if (msg?.session_id && !sessionId) {

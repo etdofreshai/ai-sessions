@@ -4,6 +4,7 @@ import { getProvider, listProviderNames, providers } from "./providers/index.js"
 import { startServer } from "./api/server.js";
 import { port as defaultPort } from "./config.js";
 import { getLive, listRunIds, loadFromDisk } from "./runs/registry.js";
+import * as aiStore from "./ai-sessions/store.js";
 
 const program = new Command();
 program
@@ -61,7 +62,8 @@ program
 program
   .command("run <provider> <prompt>")
   .description("Start a new run. Pass --session to continue an existing session.")
-  .option("-s, --session <id>", "continue an existing session")
+  .option("-s, --session <id>", "continue an existing provider session")
+  .option("-a, --as <ai-session-id>", "attribute this run to an AiSession id")
   .option("-c, --cwd <dir>", "working directory")
   .option("--no-yolo", "disable bypass-permissions / sandbox bypass")
   .option("--answer-only", "print just the final answer, suppressing intermediate stream")
@@ -69,11 +71,18 @@ program
     async (
       provider: string,
       prompt: string,
-      opts: { session?: string; cwd?: string; yolo?: boolean; answerOnly?: boolean }
+      opts: {
+        session?: string;
+        as?: string;
+        cwd?: string;
+        yolo?: boolean;
+        answerOnly?: boolean;
+      }
     ) => {
       const handle = getProvider(provider).run({
         prompt,
         sessionId: opts.session,
+        aiSessionId: opts.as,
         cwd: opts.cwd,
         yolo: opts.yolo,
       });
@@ -91,6 +100,7 @@ program
       if (opts.answerOnly) process.stdout.write((meta.output ?? "") + "\n");
       console.error(`run: ${meta.runId}  status: ${meta.status}`);
       if (meta.sessionId) console.error(`session: ${meta.sessionId}`);
+      if (meta.aiSessionId) console.error(`ai-session: ${meta.aiSessionId}`);
     }
   );
 
@@ -150,6 +160,62 @@ runs
     }
     await handle.steer(input);
     console.log("steered");
+  });
+
+const sessions = program.command("sessions").description("Manage AiSessions (provider-agnostic logical sessions)");
+
+sessions
+  .command("ls")
+  .description("List AiSessions (most recently used first)")
+  .option("--json", "output JSON")
+  .action((opts: { json?: boolean }) => {
+    const all = aiStore.list();
+    if (opts.json) {
+      console.log(JSON.stringify(all, null, 2));
+      return;
+    }
+    for (const s of all) {
+      const provs = Object.keys(s.providers).join(",");
+      console.log(`${s.updatedAt}  ${s.id}  [${provs}]  ${s.name ?? ""}`);
+    }
+  });
+
+sessions
+  .command("show <id>")
+  .description("Show an AiSession")
+  .action((id: string) => {
+    const s = aiStore.read(id);
+    if (!s) {
+      console.error(`ai-session not found: ${id}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify(s, null, 2));
+  });
+
+sessions
+  .command("rename <id> <name>")
+  .description("Set a new name on an AiSession")
+  .action((id: string, name: string) => {
+    const s = aiStore.read(id);
+    if (!s) {
+      console.error(`ai-session not found: ${id}`);
+      process.exit(1);
+    }
+    s.name = name;
+    aiStore.write(s);
+    console.log(s.id);
+  });
+
+sessions
+  .command("delete <id>")
+  .description("Delete an AiSession (does not affect underlying provider sessions)")
+  .action((id: string) => {
+    const ok = aiStore.remove(id);
+    if (!ok) {
+      console.error(`ai-session not found: ${id}`);
+      process.exit(1);
+    }
+    console.log("deleted");
   });
 
 program

@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import fg from "fast-glob";
 import { startRun } from "../runs/start.js";
+import { planAiSessionResolution } from "../ai-sessions/finalize.js";
 import type { RunHandle } from "../runs/types.js";
 import type {
   Provider,
@@ -70,16 +71,27 @@ export const opencodeProvider: Provider = {
 
   run(opts: RunOptions): RunHandle {
     const yolo = opts.yolo ?? defaultYolo();
-    return startRun({
+    const plan = planAiSessionResolution({
       provider: "opencode",
       prompt: opts.prompt,
       sessionId: opts.sessionId,
+      asId: opts.aiSessionId,
+      internal: opts.internal,
+    });
+    const effectiveSessionId = plan.effectiveProviderSessionId;
+    return startRun({
+      provider: "opencode",
+      prompt: opts.prompt,
+      sessionId: effectiveSessionId,
       cwd: opts.cwd,
       yolo,
+      internal: opts.internal,
+      aiSessionId: plan.preResolvedAiSessionId,
+      onFinalize: plan.attachToMeta,
       steerable: false,
       body: async ({ emit, onAbort }) => {
         const args = ["run", opts.prompt];
-        if (opts.sessionId) args.push("--session", opts.sessionId);
+        if (effectiveSessionId) args.push("--session", effectiveSessionId);
         if (yolo) args.push("--yolo");
 
         return new Promise<{ output: string; sessionId?: string }>((resolve, reject) => {
@@ -108,7 +120,7 @@ export const opencodeProvider: Provider = {
             if (code !== 0 && code !== null) {
               reject(new Error(`opencode exited ${code}: ${err}`));
             } else {
-              resolve({ output: out, sessionId: opts.sessionId });
+              resolve({ output: out, sessionId: effectiveSessionId });
             }
           });
         });

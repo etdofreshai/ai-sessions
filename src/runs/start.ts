@@ -8,6 +8,8 @@ export interface StartRunArgs {
   sessionId?: string;
   cwd?: string;
   yolo: boolean;
+  internal?: boolean;
+  aiSessionId?: string;
   // Producer body: receives `emit` for events. Should resolve with the final
   // output text. Must call emit({type:"session_id"}) once known. May reject;
   // rejection becomes a "failed" terminal state.
@@ -19,6 +21,10 @@ export interface StartRunArgs {
   }) => Promise<{ output: string; sessionId?: string }>;
   // Optional capability hooks.
   steerable?: boolean;
+  // Hook called after the run reaches a terminal state. Receives the final
+  // metadata; may mutate it (typically to set aiSessionId) and the change
+  // will be persisted before the run handle's `done` resolves.
+  onFinalize?: (meta: RunMetadata) => Promise<void>;
 }
 
 export function startRun(args: StartRunArgs): RunHandle {
@@ -27,10 +33,12 @@ export function startRun(args: StartRunArgs): RunHandle {
     runId,
     provider: args.provider,
     sessionId: args.sessionId,
+    aiSessionId: args.aiSessionId,
     status: "pending",
     prompt: args.prompt,
     cwd: args.cwd,
     yolo: args.yolo,
+    internal: args.internal,
     createdAt: new Date().toISOString(),
   };
   persistMeta(meta);
@@ -82,6 +90,18 @@ export function startRun(args: StartRunArgs): RunHandle {
       setStatus(meta, "failed", { error: message });
     } finally {
       bus.end();
+    }
+    if (args.onFinalize) {
+      try {
+        await args.onFinalize(meta);
+        persistMeta(meta);
+      } catch (e) {
+        // Don't fail the run because of finalize hook errors; surface them as
+        // a non-terminal error event would already have been emitted by the
+        // hook if it cared.
+        const message = e instanceof Error ? e.message : String(e);
+        persistEvent(runId, { type: "error", message: `finalize: ${message}` });
+      }
     }
     return meta;
   })();

@@ -83,7 +83,8 @@ export const openapi = {
                 required: ["prompt"],
                 properties: {
                   prompt: { type: "string" },
-                  sessionId: { type: "string" },
+                  sessionId: { type: "string", description: "Provider session id (claude session_id, codex thread_id, etc.)" },
+                  aiSessionId: { type: "string", description: "Logical AiSession id from POST /ai-sessions; auto-resolves the provider sessionId." },
                   cwd: { type: "string" },
                   yolo: { type: "boolean", description: "Default true." },
                 },
@@ -123,6 +124,40 @@ export const openapi = {
           "200": { description: "{ ok: true }" },
           "404": { description: "Run not active" },
         },
+      },
+    },
+    "/ai-sessions": {
+      get: {
+        summary: "List AiSessions (logical, provider-agnostic)",
+        responses: { "200": { description: "Array of AiSession" } },
+      },
+    },
+    "/ai-sessions/{id}": {
+      get: {
+        summary: "Get an AiSession",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "AiSession { id, name, providers: { [providerName]: { sessionId, lastUsedAt } } }" },
+          "404": { description: "Not found" },
+        },
+      },
+      patch: {
+        summary: "Update AiSession metadata (name only)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: { type: "object", properties: { name: { type: "string" } } },
+            },
+          },
+        },
+        responses: { "200": { description: "Updated AiSession" } },
+      },
+      delete: {
+        summary: "Delete an AiSession (provider sessions are not affected)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ ok: true }" } },
       },
     },
     "/providers/{provider}/runs/{runId}/steer": {

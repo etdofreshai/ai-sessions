@@ -13,6 +13,7 @@ import type {
 } from "./types.js";
 import { defaultYolo } from "./types.js";
 import { readJsonl, fileTimes } from "../sessions/jsonl.js";
+import { CodexAppServer } from "./codex-rpc.js";
 
 const codexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 const sessionsDir = () => join(codexHome(), "sessions");
@@ -95,10 +96,8 @@ export const codexProvider: Provider = {
     };
   },
 
-  // NOTE: still using @openai/codex-sdk for now. Steer is unsupported on this
-  // path; interrupt is best-effort via TurnOptions.signal. A follow-up commit
-  // replaces this with direct `codex app-server` JSON-RPC for full feature
-  // parity (steer + clean interrupt).
+  // Talks JSON-RPC NDJSON to `codex app-server` directly. Unlocks steer +
+  // clean interrupt that the npm SDK doesn't expose.
   run(opts: RunOptions): RunHandle {
     const yolo = opts.yolo ?? defaultYolo();
     return startRun({
@@ -107,33 +106,154 @@ export const codexProvider: Provider = {
       sessionId: opts.sessionId,
       cwd: opts.cwd,
       yolo,
-      steerable: false,
-      body: async ({ emit, onAbort }) => {
-        const { Codex } = await import("@openai/codex-sdk");
-        const codex = new Codex();
-        const threadOptions = {
-          ...(opts.cwd ? { workingDirectory: opts.cwd } : {}),
-          ...(yolo
-            ? {
-                sandboxMode: "danger-full-access" as const,
-                approvalPolicy: "never" as const,
-                skipGitRepoCheck: true,
+      steerable: true,
+      body: async ({ emit, onAbort, onSteer }) => {
+        const client = new CodexAppServer({ cwd: opts.cwd });
+        try {
+          await client.request("initialize", {
+            clientInfo: {
+              name: "ai-sessions",
+              title: "ai-sessions",
+              version: "0.1.0",
+            },
+          });
+
+          const threadParams: Record<string, unknown> = {};
+          if (opts.cwd) threadParams.cwd = opts.cwd;
+          if (yolo) {
+            threadParams.sandbox = "danger-full-access";
+            threadParams.approvalPolicy = "never";
+          }
+
+          const threadResult: any = opts.sessionId
+            ? await client.request("thread/resume", {
+                threadId: opts.sessionId,
+                ...threadParams,
+              })
+            : await client.request("thread/start", threadParams);
+
+          const threadId: string =
+            threadResult?.thread?.id ?? opts.sessionId ?? "";
+          if (threadId) emit({ type: "session_id", sessionId: threadId });
+
+          // State across notifications for this turn.
+          let turnId: string | null = null;
+          let textOut = "";
+          const turnDone = new Promise<{ status: string; error?: string }>((resolve) => {
+            const unsubs: Array<() => void> = [];
+            const cleanup = () => unsubs.forEach((fn) => fn());
+
+            unsubs.push(
+              client.on("turn/started", (p: any) => {
+                const tid = p?.turn?.id ?? p?.turnId;
+                if (tid && !turnId) turnId = tid;
+              })
+            );
+            unsubs.push(
+              client.on("item/agentMessage/delta", (p: any) => {
+                if (p?.delta) {
+                  textOut += p.delta;
+                  emit({ type: "text", text: p.delta });
+                }
+              })
+            );
+            unsubs.push(
+              client.on("item/completed", (p: any) => {
+                const item = p?.item;
+                if (!item) return;
+                if (item.type === "agent_message" && item.text) {
+                  if (!textOut) {
+                    textOut = item.text;
+                    emit({ type: "text", text: item.text });
+                  }
+                } else if (item.type === "command_execution") {
+                  emit({
+                    type: "tool_use",
+                    name: "command_execution",
+                    input: { command: item.command, status: item.status },
+                  });
+                } else if (item.type === "error") {
+                  emit({ type: "error", message: item.message ?? "codex error" });
+                }
+              })
+            );
+            unsubs.push(
+              client.on("error", (p: any) => {
+                const msg = p?.error?.message;
+                if (msg) emit({ type: "error", message: msg });
+              })
+            );
+            unsubs.push(
+              client.on("turn/completed", (p: any) => {
+                cleanup();
+                const status = p?.turn?.status ?? "completed";
+                const error = p?.turn?.error?.message;
+                resolve({ status, ...(error ? { error } : {}) });
+              })
+            );
+            unsubs.push(
+              client.on("turn/failed", (p: any) => {
+                cleanup();
+                resolve({
+                  status: "failed",
+                  error: p?.error?.message ?? "turn failed",
+                });
+              })
+            );
+          });
+
+          // Capture turnId from the response too (for steer/interrupt).
+          const turnStartResultPromise = client
+            .request("turn/start", {
+              threadId,
+              input: [{ type: "text", text: opts.prompt }],
+            })
+            .then((res: any) => {
+              if (res?.turn?.id && !turnId) turnId = res.turn.id;
+              return res;
+            })
+            .catch((err: Error) => {
+              emit({ type: "error", message: err.message });
+              throw err;
+            });
+
+          onAbort(async () => {
+            if (threadId && turnId) {
+              try {
+                await client.request("turn/interrupt", { threadId, turnId });
+              } catch {
+                /* best effort */
               }
-            : {}),
-        };
-        const thread = opts.sessionId
-          ? codex.resumeThread(opts.sessionId, threadOptions)
-          : codex.startThread(threadOptions);
+            }
+          });
 
-        const ac = new AbortController();
-        onAbort(() => ac.abort());
+          onSteer?.(async (input: string) => {
+            if (!threadId || !turnId) return;
+            try {
+              await client.request("turn/steer", {
+                threadId,
+                expectedTurnId: turnId,
+                input: [{ type: "text", text: input }],
+              });
+            } catch (e) {
+              emit({
+                type: "error",
+                message: `steer failed: ${e instanceof Error ? e.message : String(e)}`,
+              });
+            }
+          });
 
-        const turn = await thread.run(opts.prompt, { signal: ac.signal });
-        const output = turn.finalResponse;
-        const sessionId = thread.id ?? opts.sessionId ?? undefined;
-        if (sessionId) emit({ type: "session_id", sessionId });
-        if (output) emit({ type: "text", text: output });
-        return { output, sessionId };
+          await turnStartResultPromise;
+          const final = await turnDone;
+          // Top-level `error` notification already emitted the error event;
+          // here we just propagate failure to the run framework.
+          if (final.status === "failed") {
+            throw new Error(final.error ?? "codex turn failed");
+          }
+          return { output: textOut, sessionId: threadId || undefined };
+        } finally {
+          await client.close();
+        }
       },
     });
   },

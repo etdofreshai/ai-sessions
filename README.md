@@ -62,10 +62,10 @@ POST body for runs:
 |---|---|---|---|
 | new session | ✓ | ✓ | ✓ |
 | resume (`--session`) | ✓ | ✓ | ✓ |
-| interrupt | ✓ (`Query.interrupt`) | best-effort (`AbortSignal`) | ✓ (kill child) |
-| steer | ✓ (streaming-input) | ✗ (501) | ✗ (501) |
+| interrupt | ✓ (`Query.interrupt`) | ✓ (`turn/interrupt`) | ✓ (kill child) |
+| steer | ✓ (streaming-input) | ✓ (`turn/steer`) | ✗ (501) |
 
-Codex steer is pending a switch from `@openai/codex-sdk` to direct `codex app-server` JSON-RPC.
+Codex talks JSON-RPC NDJSON directly to `codex app-server` (not the npm SDK), which exposes `turn/steer` and `turn/interrupt`. Override the binary via `CODEX_BIN`.
 
 ## Config
 

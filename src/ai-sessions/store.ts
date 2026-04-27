@@ -83,3 +83,21 @@ export function attach(
   };
   return write(ai);
 }
+
+// Set or clear a provider mapping. Pass a non-empty string to set;
+// pass null or empty string to unset.
+export function setProvider(
+  ai: AiSession,
+  provider: string,
+  providerSessionId: string | null,
+): AiSession {
+  if (!providerSessionId) {
+    delete ai.providers[provider];
+  } else {
+    ai.providers[provider] = {
+      sessionId: providerSessionId,
+      lastUsedAt: new Date().toISOString(),
+    };
+  }
+  return write(ai);
+}

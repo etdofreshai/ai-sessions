@@ -160,6 +160,36 @@ export const openapi = {
         responses: { "200": { description: "{ ok: true }" } },
       },
     },
+    "/ai-sessions/{id}/providers/{provider}": {
+      put: {
+        summary: "Map a provider session id to an AiSession",
+        description: "Pass an empty/missing sessionId to unset.",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "provider", in: "path", required: true, schema: { type: "string" } },
+        ],
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { sessionId: { type: "string", description: "Empty/omitted = unset" } },
+              },
+            },
+          },
+        },
+        responses: { "200": { description: "Updated AiSession" } },
+      },
+      delete: {
+        summary: "Remove a provider mapping from an AiSession",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "provider", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "Updated AiSession" } },
+      },
+    },
     "/providers/{provider}/runs/{runId}/steer": {
       post: {
         summary: "Inject a mid-run user message (Claude only today)",

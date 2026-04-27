@@ -160,6 +160,22 @@ export function createApp() {
     res.json({ ok: true });
   });
 
+  // Map a provider session to an AiSession. Empty/missing sessionId unsets.
+  app.put("/ai-sessions/:id/providers/:provider", (req, res) => {
+    const s = aiStore.read(req.params.id);
+    if (!s) return res.status(404).json({ error: "ai-session not found" });
+    const sid = typeof req.body?.sessionId === "string" ? req.body.sessionId : null;
+    aiStore.setProvider(s, req.params.provider, sid || null);
+    res.json(s);
+  });
+
+  app.delete("/ai-sessions/:id/providers/:provider", (req, res) => {
+    const s = aiStore.read(req.params.id);
+    if (!s) return res.status(404).json({ error: "ai-session not found" });
+    aiStore.setProvider(s, req.params.provider, null);
+    res.json(s);
+  });
+
   app.use((err: any, _req: Request, res: Response, _next: express.NextFunction) => {
     res.status(500).json({ error: err?.message ?? String(err) });
   });

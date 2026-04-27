@@ -207,6 +207,34 @@ sessions
   });
 
 sessions
+  .command("map <id> <provider> [providerSessionId]")
+  .description(
+    "Attach a provider session to an AiSession. Omit providerSessionId (or pass empty) to unset."
+  )
+  .action((id: string, provider: string, providerSessionId?: string) => {
+    const s = aiStore.read(id);
+    if (!s) {
+      console.error(`ai-session not found: ${id}`);
+      process.exit(1);
+    }
+    aiStore.setProvider(s, provider, providerSessionId || null);
+    console.log(JSON.stringify(s.providers, null, 2));
+  });
+
+sessions
+  .command("unmap <id> <provider>")
+  .description("Remove a provider mapping from an AiSession")
+  .action((id: string, provider: string) => {
+    const s = aiStore.read(id);
+    if (!s) {
+      console.error(`ai-session not found: ${id}`);
+      process.exit(1);
+    }
+    aiStore.setProvider(s, provider, null);
+    console.log(JSON.stringify(s.providers, null, 2));
+  });
+
+sessions
   .command("delete <id>")
   .description("Delete an AiSession (does not affect underlying provider sessions)")
   .action((id: string) => {

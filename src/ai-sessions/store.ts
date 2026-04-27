@@ -103,6 +103,14 @@ export function findByProviderSession(
   return null;
 }
 
+// Find the AiSession bound to a given Telegram chat id.
+export function findByTelegramChat(chatId: number): AiSession | null {
+  for (const s of list()) {
+    if (s.channels?.telegram?.chatId === chatId) return s;
+  }
+  return null;
+}
+
 export function create(args: {
   provider: string;
   sessionId: string;

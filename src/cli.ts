@@ -5,6 +5,7 @@ import { startServer } from "./api/server.js";
 import { port as defaultPort } from "./config.js";
 import { getLive, listRunIds, loadFromDisk } from "./runs/registry.js";
 import * as aiStore from "./ai-sessions/store.js";
+import { channels as channelRegistry, listChannelNames } from "./channels/index.js";
 
 const program = new Command();
 program
@@ -242,6 +243,46 @@ sessions
       process.exit(1);
     }
     console.log("deleted");
+  });
+
+program
+  .command("message <channel> <chatId> <message>")
+  .description("Send an ad-hoc message via a channel (no session involved)")
+  .option("--thread-id <n>", "telegram message_thread_id (forum topic)", (v) => parseInt(v, 10))
+  .action(
+    async (
+      channel: string,
+      chatId: string,
+      message: string,
+      opts: { threadId?: number }
+    ) => {
+      const ch = channelRegistry[channel];
+      if (!ch) {
+        console.error(`unknown channel: ${channel}`);
+        process.exit(1);
+      }
+      if (!(await ch.isAvailable())) {
+        console.error(`channel "${channel}" is not configured (check .env)`);
+        process.exit(1);
+      }
+      const idNum = parseInt(chatId, 10);
+      if (!Number.isFinite(idNum)) {
+        console.error(`chatId must be numeric, got: ${chatId}`);
+        process.exit(1);
+      }
+      await ch.send({ chatId: idNum, threadId: opts.threadId }, { text: message });
+      console.log("sent");
+    }
+  );
+
+program
+  .command("channels")
+  .description("List configured channels and their availability")
+  .action(async () => {
+    for (const name of listChannelNames()) {
+      const ok = await channelRegistry[name].isAvailable();
+      console.log(`${ok ? "[x]" : "[ ]"} ${name}`);
+    }
   });
 
 program

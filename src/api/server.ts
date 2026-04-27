@@ -10,6 +10,11 @@ import {
   loadFromDisk,
 } from "../runs/registry.js";
 import * as aiStore from "../ai-sessions/store.js";
+import {
+  channels as channelRegistry,
+  listChannelNames,
+  startAvailableChannels,
+} from "../channels/index.js";
 import { openapi } from "./openapi.js";
 
 export function createApp() {
@@ -136,6 +141,16 @@ export function createApp() {
   });
 
   // AiSession CRUD.
+  app.get("/channels", async (_req, res) => {
+    const out = await Promise.all(
+      listChannelNames().map(async (name) => ({
+        name,
+        available: await channelRegistry[name].isAvailable(),
+      }))
+    );
+    res.json(out);
+  });
+
   app.get("/sessions", (_req, res) => {
     res.json(aiStore.list());
   });
@@ -189,10 +204,13 @@ export function createApp() {
 
 export function startServer(port: number) {
   const app = createApp();
-  return app.listen(port, () => {
+  const server = app.listen(port, () => {
     console.log(`ai-sessions API listening on http://localhost:${port}`);
     console.log(`docs: http://localhost:${port}/openapi.json`);
     console.log(`YOLO default: ${defaultYolo()}`);
     console.log(`data dir: ${dataDir()}`);
   });
+  // Fire and forget — channels self-skip if not configured.
+  void startAvailableChannels();
+  return server;
 }

@@ -26,6 +26,12 @@ export const openapi = {
         responses: { "200": { description: "Array of { name, available }" } },
       },
     },
+    "/channels": {
+      get: {
+        summary: "List configured channels and their availability",
+        responses: { "200": { description: "Array of { name, available }" } },
+      },
+    },
     "/providers/{provider}/sessions": {
       get: {
         summary: "List sessions for a provider",

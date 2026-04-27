@@ -25,7 +25,7 @@ def providers() -> None:
     async def _go() -> None:
         for name in list_provider_names():
             ok = await PROVIDERS[name].is_available()
-            typer.echo(f"{'✓' if ok else '·'} {name}")
+            typer.echo(f"{'[x]' if ok else '[ ]'} {name}")
 
     asyncio.run(_go())
 

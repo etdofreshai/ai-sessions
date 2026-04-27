@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import os
+import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,35 @@ def _flatten(content: Any) -> str:
                 out.append(str(c))
         return "\n".join(out)
     return "" if content is None else str(content)
+
+
+def _codex_command() -> list[str]:
+    """Resolve the `codex app-server` command, handling Windows .cmd shims."""
+    override = os.environ.get("CODEX_BIN")
+    if override:
+        return [override, "app-server"]
+    # On Windows, npm-installed `codex` is `codex.cmd`; subprocess won't auto-resolve.
+    candidates = ["codex.cmd", "codex.exe", "codex"] if sys.platform == "win32" else ["codex"]
+    for name in candidates:
+        found = shutil.which(name)
+        if found:
+            return [found, "app-server"]
+    return ["codex", "app-server"]
+
+
+def _build_thread_config(yolo: bool, cwd: str | None) -> Any:
+    """Build a ThreadConfig with YOLO and cwd applied. Returns None if no overrides."""
+    from codex_app_server_sdk import ThreadConfig
+
+    kwargs: dict[str, Any] = {}
+    if cwd:
+        kwargs["cwd"] = cwd
+    if yolo:
+        kwargs["sandbox"] = "danger-full-access"
+        kwargs["approval_policy"] = "never"
+    if not kwargs:
+        return None
+    return ThreadConfig(**kwargs)
 
 
 class CodexProvider:
@@ -106,40 +136,28 @@ class CodexProvider:
         cwd: str | None = None,
         yolo: bool | None = None,
     ) -> RunResult:
-        # NOTE: package import path is the working assumption from openai/codex
-        # sdk/python; verify after `pip install` and adjust if needed.
-        from codex_app_server import Codex, TextInput  # type: ignore
+        from codex_app_server_sdk import CodexClient
 
         is_yolo = yolo_default() if yolo is None else yolo
+        config = _build_thread_config(is_yolo, cwd)
 
-        thread_kwargs: dict[str, Any] = {}
-        if cwd:
-            thread_kwargs["cwd"] = cwd
-        if is_yolo:
-            thread_kwargs["sandbox_policy"] = {
-                "type": "danger-full-access",
-            }
-            thread_kwargs["approval_policy"] = "never"
-            thread_kwargs["skip_git_repo_check"] = True
+        async with CodexClient.connect_stdio(command=_codex_command()) as client:
+            await client.initialize()
+            if session_id:
+                thread = await client.resume_thread(session_id, overrides=config)
+            else:
+                thread = await client.start_thread(config=config)
+            result = await client.chat_once(prompt, thread_id=thread.thread_id)
 
-        def _run() -> RunResult:
-            with Codex() as codex:
-                if session_id:
-                    thread = codex.thread_resume(session_id, **thread_kwargs)
-                else:
-                    thread = codex.thread_start(**thread_kwargs)
-                turn = thread.turn(TextInput(prompt))
-                result = turn.run()
-                final_text = ""
-                # Best-effort extraction; codex Turn shape varies by version.
-                items = getattr(result, "items", None) or getattr(turn, "items", [])
-                for item in items:
-                    text = getattr(item, "text", None)
-                    if text:
-                        final_text += text + "\n"
-                if not final_text:
-                    final_text = str(getattr(result, "final_response", "") or "")
-                tid = getattr(thread, "id", None) or session_id
-                return RunResult(sessionId=tid, output=final_text.strip(), raw=result)
-
-        return await asyncio.to_thread(_run)
+        # ChatResult exposes assistant text + items; pick the most useful field.
+        output = ""
+        for attr in ("assistant_text", "final_response", "text"):
+            v = getattr(result, attr, None)
+            if v:
+                output = v
+                break
+        return RunResult(
+            sessionId=getattr(thread, "thread_id", None) or session_id,
+            output=output,
+            raw=result,
+        )

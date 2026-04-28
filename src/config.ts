@@ -41,7 +41,7 @@ export function workspaceDir(): string {
   if (explicit) {
     p = resolve(explicit);
   } else {
-    const name = process.env.AI_SESSIONS_WORKSPACE_NAME || "workspaces";
+    const name = process.env.AI_SESSIONS_WORKSPACE_NAME || "workspace";
     p = join(dataDir(), name);
   }
   if (!existsSync(p)) mkdirSync(p, { recursive: true });

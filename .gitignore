@@ -3,7 +3,7 @@ dist
 /runs/
 /sessions/
 /uploads/
-/workspaces/
+/workspace/
 .env
 .env.local
 *.log

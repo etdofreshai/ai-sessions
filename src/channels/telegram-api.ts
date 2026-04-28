@@ -102,6 +102,13 @@ export class TelegramApi {
     return this.call<TgUser>("getMe");
   }
 
+  // For groups returns { title }, for private chats { first_name, username }.
+  getChat(chat_id: number) {
+    return this.call<TgChat & { first_name?: string; username?: string }>("getChat", {
+      chat_id,
+    });
+  }
+
   // Two-step download: getFile returns metadata with file_path; the file is
   // then fetched from /file/bot<TOKEN>/<file_path>.
   getFile(file_id: string) {
@@ -140,6 +147,10 @@ export class TelegramApi {
     return this.call("editMessageText", opts);
   }
 
+  deleteMessage(opts: { chat_id: number; message_id: number }) {
+    return this.call("deleteMessage", opts);
+  }
+
   answerCallbackQuery(opts: { callback_query_id: string; text?: string; show_alert?: boolean }) {
     return this.call("answerCallbackQuery", opts);
   }
@@ -151,6 +162,33 @@ export class TelegramApi {
     scope?: { type: "default" | "all_private_chats" | "all_group_chats" | "all_chat_administrators" };
   }) {
     return this.call("setMyCommands", opts);
+  }
+
+  async sendDocument(opts: {
+    chat_id: number;
+    file: { bytes: Buffer; filename: string; mimeType?: string };
+    caption?: string;
+    message_thread_id?: number;
+  }): Promise<TgMessage> {
+    const fd = new FormData();
+    fd.set("chat_id", String(opts.chat_id));
+    if (opts.caption) fd.set("caption", opts.caption);
+    if (opts.message_thread_id != null) {
+      fd.set("message_thread_id", String(opts.message_thread_id));
+    }
+    const blob = new Blob([new Uint8Array(opts.file.bytes)], {
+      type: opts.file.mimeType ?? "application/octet-stream",
+    });
+    fd.set("document", blob, opts.file.filename);
+    const res = await fetch(`${API_BASE}/bot${this.token}/sendDocument`, {
+      method: "POST",
+      body: fd,
+    });
+    const json: any = await res.json();
+    if (!json.ok) {
+      throw new Error(`telegram sendDocument failed: ${json.description ?? JSON.stringify(json)}`);
+    }
+    return json.result as TgMessage;
   }
 
   sendChatAction(opts: {

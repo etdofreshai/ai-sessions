@@ -14,6 +14,9 @@ function looksLikeNoise(text: string): boolean {
   if (t.startsWith("<")) return true;
   if (t.startsWith("[Image")) return true;
   if (t.startsWith("Caveat:")) return true;
+  // Slash commands (e.g. /remote-control is active…) are status pings, not
+  // the user's real first message — keep scanning past them.
+  if (t.startsWith("/")) return true;
   return false;
 }
 

@@ -92,10 +92,13 @@ function buildClaudeContent(
 
 export interface ClaudeFlavorConfig {
   name: string;
-  // Extra env vars layered on top of process.env + workspace .env. Used by
-  // GLM-style flavors that point Claude Code at a different ANTHROPIC_BASE_URL
-  // and override model names. Returns null if the flavor isn't configured —
-  // listSessions will still work but `run` will refuse.
+  // Path to an extra settings file passed to the SDK as `settings: <path>`.
+  // Used by GLM-style flavors that point Claude Code at a different
+  // ANTHROPIC_BASE_URL etc. via a settings.json env block.
+  settingsPath?: () => string | null;
+  // Extra env vars layered on top of process.env + workspace .env. Rarely
+  // needed — prefer settingsPath when possible, since claude-code respects
+  // env blocks inside settings files natively.
   envOverlay?: () => Record<string, string> | null;
   // Stricter availability check. Defaults to checking that the claude
   // projects dir exists.
@@ -224,6 +227,10 @@ export function makeClaudeFlavoredProvider(cfg: ClaudeFlavorConfig): Provider {
         const skillsCatalog = effectiveCwd ? buildCatalog(effectiveCwd) : "";
         const workspaceEnv = loadDotenv(effectiveCwd);
         const flavorEnv = cfg.envOverlay?.() ?? {};
+        const flavorSettings = cfg.settingsPath?.() ?? null;
+        if (cfg.name !== "claude") {
+          console.error(`[${cfg.name}] settingsPath=${flavorSettings ?? "(none)"} envKeys=${Object.keys(flavorEnv).join(",")||"(none)"}`);
+        }
         const stream = query({
           prompt: userStream(),
           options: {
@@ -233,6 +240,7 @@ export function makeClaudeFlavoredProvider(cfg: ClaudeFlavorConfig): Provider {
               ...workspaceEnv,
               ...flavorEnv,
             },
+            ...(flavorSettings ? { settings: flavorSettings } : {}),
             ...(skillsCatalog
               ? {
                   systemPrompt: {

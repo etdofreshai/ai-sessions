@@ -16,6 +16,8 @@ import {
   startAvailableChannels,
 } from "../channels/index.js";
 import { openapi } from "./openapi.js";
+import * as cronStore from "../crons/store.js";
+import { makeJob, nextFireAfter } from "../crons/scheduler.js";
 
 export function createApp() {
   const app = express();
@@ -194,6 +196,46 @@ export function createApp() {
     } catch (e) {
       next(e);
     }
+  });
+
+  app.get("/crons", (_req, res) => {
+    res.json(cronStore.list());
+  });
+
+  app.get("/crons/:name", (req, res) => {
+    const j = cronStore.read(req.params.name);
+    if (!j) return res.status(404).json({ error: "cron not found" });
+    res.json(j);
+  });
+
+  app.post("/crons", (req, res) => {
+    const { name, cron, target, timezone, missedPolicy } = req.body ?? {};
+    if (!name || !cron || !target?.kind) {
+      return res.status(400).json({ error: "name, cron, target.kind required" });
+    }
+    const job = makeJob({ name, cron, target, timezone, missedPolicy });
+    cronStore.write(job);
+    res.json(job);
+  });
+
+  app.patch("/crons/:name", (req, res) => {
+    const j = cronStore.read(req.params.name);
+    if (!j) return res.status(404).json({ error: "cron not found" });
+    const { enabled, cron, target, timezone, missedPolicy } = req.body ?? {};
+    if (typeof enabled === "boolean") j.enabled = enabled;
+    if (typeof cron === "string") j.cron = cron;
+    if (target) j.target = target;
+    if (typeof timezone === "string") j.timezone = timezone;
+    if (missedPolicy) j.missedPolicy = missedPolicy;
+    j.nextRunAt = nextFireAfter(j.cron, new Date(), j.timezone).toISOString();
+    cronStore.write(j);
+    res.json(j);
+  });
+
+  app.delete("/crons/:name", (req, res) => {
+    const ok = cronStore.remove(req.params.name);
+    if (!ok) return res.status(404).json({ error: "cron not found" });
+    res.json({ ok: true });
   });
 
   app.use((err: any, _req: Request, res: Response, _next: express.NextFunction) => {

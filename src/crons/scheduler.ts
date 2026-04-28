@@ -101,14 +101,56 @@ async function tickOnce(now: Date): Promise<void> {
       lastError = e instanceof Error ? e.message : String(e);
     }
 
-    // Recompute next run. For run_all we'd loop until next > now; default skips
-    // missed slots and just schedules the next future fire.
     const fresh = store.read(job.name);
     if (!fresh) continue;
     fresh.lastRunAt = new Date().toISOString();
     fresh.lastError = lastError;
     fresh.nextRunAt = nextFireAfter(fresh.cron, new Date(), fresh.timezone).toISOString();
     store.write(fresh);
+  }
+}
+
+// On startup: handle jobs whose nextRunAt is already in the past based on
+// missedPolicy. "skip" = realign to the next future fire. "run_once" = fire
+// once now (handled by the normal tick — no-op here). "run_all" = fire once
+// per missed slot, then realign.
+async function catchUp(now: Date): Promise<void> {
+  for (const job of store.list()) {
+    if (!job.enabled) continue;
+    if (new Date(job.nextRunAt) > now) continue;
+
+    if (job.missedPolicy === "skip") {
+      const fresh = store.read(job.name);
+      if (!fresh) continue;
+      fresh.nextRunAt = nextFireAfter(fresh.cron, now, fresh.timezone).toISOString();
+      store.write(fresh);
+      continue;
+    }
+
+    if (job.missedPolicy === "run_all") {
+      // Each iteration fires once and advances next; bounded to avoid runaway
+      // loops on long downtimes.
+      let safety = 1000;
+      while (safety-- > 0) {
+        const fresh = store.read(job.name);
+        if (!fresh || !fresh.enabled) break;
+        if (new Date(fresh.nextRunAt) > new Date()) break;
+        if (!tryClaim(fresh)) break;
+        let lastError: string | undefined;
+        try {
+          await fire(fresh);
+        } catch (e) {
+          lastError = e instanceof Error ? e.message : String(e);
+        }
+        const after = store.read(fresh.name);
+        if (!after) break;
+        after.lastRunAt = new Date().toISOString();
+        after.lastError = lastError;
+        after.nextRunAt = nextFireAfter(after.cron, new Date(after.nextRunAt), after.timezone).toISOString();
+        store.write(after);
+      }
+    }
+    // run_once falls through — the next tickOnce will fire it.
   }
 }
 
@@ -121,7 +163,9 @@ export function startScheduler(): void {
       console.error("[crons] tick error:", e);
     });
   };
-  run();
+  catchUp(new Date())
+    .catch((e) => console.error("[crons] catch-up error:", e))
+    .finally(run);
   timer = setInterval(run, TICK_MS);
   if (typeof timer.unref === "function") timer.unref();
 }

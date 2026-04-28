@@ -22,23 +22,21 @@ RUN apt-get update \
         @openai/codex \
         opencode-ai
 
+# Install Claude Code's native binary system-wide. The official install.sh
+# would land it under $HOME/.local/bin/claude, but deployments often mount
+# host volumes over /home/node which would shadow it at runtime. Place it
+# at /usr/local/bin/claude instead — immune to home-dir mounts.
+RUN set -eux \
+    && CC_VERSION=$(curl -fsSL https://downloads.claude.ai/claude-code-releases/latest) \
+    && curl -fsSL "https://downloads.claude.ai/claude-code-releases/$CC_VERSION/linux-x64/claude" \
+        -o /usr/local/bin/claude \
+    && chmod +x /usr/local/bin/claude \
+    && /usr/local/bin/claude --version
+
 WORKDIR /app
 RUN chown node:node /app
 
 USER node
-
-# Install Claude Code's native binary directly. The official install.sh
-# downloads to a temp path, runs `claude install` to create a launcher in
-# ~/.local/bin/claude, then deletes the temp — but that launcher step is
-# unreliable in non-interactive Docker builds. Mimic the download steps
-# manually and drop the binary into a stable location ourselves.
-RUN set -eux \
-    && mkdir -p /home/node/.local/bin \
-    && CC_VERSION=$(curl -fsSL https://downloads.claude.ai/claude-code-releases/latest) \
-    && curl -fsSL "https://downloads.claude.ai/claude-code-releases/$CC_VERSION/linux-x64/claude" \
-        -o /home/node/.local/bin/claude \
-    && chmod +x /home/node/.local/bin/claude \
-    && /home/node/.local/bin/claude --version
 
 # Install project deps first (cache-friendly).
 COPY --chown=node:node package.json package-lock.json* ./
@@ -54,7 +52,7 @@ ENV AI_SESSIONS_DATA_DIR=/app/data
 ENV AI_SESSIONS_WORKSPACE_DIR=/app/workspace
 ENV AI_SESSIONS_PORT=7878
 # Point the agent-sdk at the natively-installed claude binary.
-ENV CLAUDE_CODE_EXECUTABLE=/home/node/.local/bin/claude
+ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude
 
 EXPOSE 7878
 

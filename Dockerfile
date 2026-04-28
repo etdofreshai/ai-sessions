@@ -34,7 +34,7 @@ COPY --chown=node:node package.json package-lock.json* ./
 # Pin and install the glibc Linux x64 binary explicitly afterward so the
 # `claude` runtime can be located inside the container.
 RUN npm ci \
-    && SDK_VERSION=$(node -p "require('@anthropic-ai/claude-agent-sdk/package.json').version") \
+    && SDK_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('/app/node_modules/@anthropic-ai/claude-agent-sdk/package.json','utf8')).version") \
     && npm install --no-save "@anthropic-ai/claude-agent-sdk-linux-x64@$SDK_VERSION"
 
 # Copy source and build.

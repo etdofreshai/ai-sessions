@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 // Best-effort .env load (Node >=20.6). No-op if no file or older Node.
 try {
@@ -25,4 +25,25 @@ export function port(): number {
 
 export function defaultAgent(): string {
   return process.env.AI_SESSIONS_DEFAULT_AGENT || "claude";
+}
+
+// The directory agents should run inside by default (mainly for
+// channel-driven runs where the caller has no cwd of its own).
+//
+// Resolution order:
+//   1. AI_SESSIONS_WORKSPACE_DIR — absolute or relative path; used verbatim.
+//   2. <dataDir>/<AI_SESSIONS_WORKSPACE_NAME> — defaults to "workspaces".
+//
+// Auto-created on first access.
+export function workspaceDir(): string {
+  const explicit = process.env.AI_SESSIONS_WORKSPACE_DIR;
+  let p: string;
+  if (explicit) {
+    p = resolve(explicit);
+  } else {
+    const name = process.env.AI_SESSIONS_WORKSPACE_NAME || "workspaces";
+    p = join(dataDir(), name);
+  }
+  if (!existsSync(p)) mkdirSync(p, { recursive: true });
+  return p;
 }

@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import fg from "fast-glob";
 import { startRun } from "../runs/start.js";
 import { planAiSessionResolution } from "../ai-sessions/finalize.js";
+import { loadDotenv } from "../sessions/dotenv.js";
 import type { RunHandle } from "../runs/types.js";
 import type {
   Provider,
@@ -76,27 +77,37 @@ export const opencodeProvider: Provider = {
       prompt: opts.prompt,
       sessionId: opts.sessionId,
       asId: opts.aiSessionId,
+      cwd: opts.cwd,
       internal: opts.internal,
     });
     const effectiveSessionId = plan.effectiveProviderSessionId;
+    const effectiveCwd = plan.effectiveCwd;
     return startRun({
       provider: "opencode",
       prompt: opts.prompt,
       sessionId: effectiveSessionId,
-      cwd: opts.cwd,
+      cwd: effectiveCwd,
       yolo,
       internal: opts.internal,
       aiSessionId: plan.preResolvedAiSessionId,
       onFinalize: plan.attachToMeta,
       steerable: false,
       body: async ({ emit, onAbort }) => {
-        const args = ["run", opts.prompt];
+        const attachLines = (opts.attachments ?? []).map(
+          (a) => `[Attached file: ${a.path}]`
+        );
+        const fullPrompt = attachLines.length
+          ? `${opts.prompt}\n${attachLines.join("\n")}`
+          : opts.prompt;
+        const args = ["run", fullPrompt];
         if (effectiveSessionId) args.push("--session", effectiveSessionId);
         if (yolo) args.push("--yolo");
 
         return new Promise<{ output: string; sessionId?: string }>((resolve, reject) => {
+          const workspaceEnv = loadDotenv(effectiveCwd);
           const child = spawn("opencode", args, {
-            cwd: opts.cwd,
+            cwd: effectiveCwd,
+            env: { ...process.env, ...workspaceEnv },
             stdio: ["ignore", "pipe", "pipe"],
             shell: process.platform === "win32",
           });

@@ -4,6 +4,8 @@ import { existsSync } from "node:fs";
 import fg from "fast-glob";
 import { startRun } from "../runs/start.js";
 import { planAiSessionResolution } from "../ai-sessions/finalize.js";
+import { buildCatalog } from "../skills/catalog.js";
+import { loadDotenv } from "../sessions/dotenv.js";
 import type { RunHandle } from "../runs/types.js";
 import type {
   Provider,
@@ -106,21 +108,27 @@ export const codexProvider: Provider = {
       prompt: opts.prompt,
       sessionId: opts.sessionId,
       asId: opts.aiSessionId,
+      cwd: opts.cwd,
       internal: opts.internal,
     });
     const effectiveSessionId = plan.effectiveProviderSessionId;
+    const effectiveCwd = plan.effectiveCwd;
     return startRun({
       provider: "codex",
       prompt: opts.prompt,
       sessionId: effectiveSessionId,
-      cwd: opts.cwd,
+      cwd: effectiveCwd,
       yolo,
       internal: opts.internal,
       aiSessionId: plan.preResolvedAiSessionId,
       onFinalize: plan.attachToMeta,
       steerable: true,
       body: async ({ emit, onAbort, onSteer }) => {
-        const client = new CodexAppServer({ cwd: opts.cwd });
+        const workspaceEnv = loadDotenv(effectiveCwd);
+        const client = new CodexAppServer({
+          cwd: effectiveCwd,
+          env: { ...process.env, ...workspaceEnv },
+        });
         try {
           await client.request("initialize", {
             clientInfo: {
@@ -131,10 +139,14 @@ export const codexProvider: Provider = {
           });
 
           const threadParams: Record<string, unknown> = {};
-          if (opts.cwd) threadParams.cwd = opts.cwd;
+          if (effectiveCwd) threadParams.cwd = effectiveCwd;
           if (yolo) {
             threadParams.sandbox = "danger-full-access";
             threadParams.approvalPolicy = "never";
+          }
+          const skillsCatalog = effectiveCwd ? buildCatalog(effectiveCwd) : "";
+          if (skillsCatalog) {
+            threadParams.developer_instructions = skillsCatalog;
           }
 
           const threadResult: any = effectiveSessionId
@@ -214,11 +226,26 @@ export const codexProvider: Provider = {
             );
           });
 
+          // Build input items: text + any image attachments as local_image.
+          // Document attachments get appended to the text as path references.
+          const inputItems: any[] = [];
+          const docPaths = (opts.attachments ?? [])
+            .filter((a) => a.kind === "document")
+            .map((a) => a.path);
+          const textBody =
+            opts.prompt +
+            (docPaths.length
+              ? "\n" + docPaths.map((p) => `[Attached file: ${p}]`).join("\n")
+              : "");
+          if (textBody) inputItems.push({ type: "text", text: textBody });
+          for (const a of opts.attachments ?? []) {
+            if (a.kind === "image") inputItems.push({ type: "local_image", path: a.path });
+          }
           // Capture turnId from the response too (for steer/interrupt).
           const turnStartResultPromise = client
             .request("turn/start", {
               threadId,
-              input: [{ type: "text", text: opts.prompt }],
+              input: inputItems,
             })
             .then((res: any) => {
               if (res?.turn?.id && !turnId) turnId = res.turn.id;

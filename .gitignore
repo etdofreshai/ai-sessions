@@ -2,6 +2,8 @@ node_modules
 dist
 /runs/
 /sessions/
+/uploads/
+/workspaces/
 .env
 .env.local
 *.log

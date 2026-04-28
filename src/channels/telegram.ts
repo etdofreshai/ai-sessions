@@ -1,7 +1,13 @@
 import * as aiStore from "../ai-sessions/store.js";
 import { getProvider, listProviderNames } from "../providers/index.js";
 import { getLive } from "../runs/registry.js";
-import { previewFromJsonl } from "../sessions/preview.js";
+import { workspaceDir } from "../config.js";
+import { listSkills } from "../skills/catalog.js";
+import { previewFromJsonl, shortenPath } from "../sessions/preview.js";
+import { markdownToTelegramHtml } from "./telegram-format.js";
+import { downloadTelegramFile } from "./telegram-download.js";
+import { transcribe } from "./stt.js";
+import type { Attachment } from "../providers/types.js";
 import {
   TelegramApi,
   type InlineKeyboardButton,
@@ -13,10 +19,30 @@ import type { Channel, ChannelAddress, ChannelMessage, TelegramAddress } from ".
 
 const PAGE_SIZE = 5;
 
+const SLASH_COMMANDS = [
+  { command: "help", description: "List available commands" },
+  { command: "status", description: "Show this chat's bound session" },
+  { command: "bind", description: "(Re)bind this chat to a Session" },
+  { command: "cwd", description: "Show or set the bound session's cwd" },
+  { command: "rename", description: "Rename the bound session (no arg = auto-summarize)" },
+  { command: "skills", description: "List enabled skills in the workspace" },
+  { command: "interrupt", description: "Interrupt the current run (best-effort)" },
+];
+
 interface PendingBinding {
   firstMessage: string;
+  attachments?: Attachment[];
   awaitingSince: number;
 }
+
+interface MediaGroupBuffer {
+  chatId: number;
+  caption: string;
+  attachments: Attachment[];
+  flushTimer: NodeJS.Timeout | null;
+}
+
+const MEDIA_GROUP_FLUSH_MS = 1200;
 
 function token(): string | null {
   return process.env.TELEGRAM_BOT_TOKEN || null;
@@ -78,6 +104,8 @@ export class TelegramChannel implements Channel {
   private offset = 0;
   // chatId → pending binding state (in-memory only).
   private pending = new Map<number, PendingBinding>();
+  // media_group_id → buffered photos that arrived in the same album.
+  private mediaGroups = new Map<string, MediaGroupBuffer>();
 
   async isAvailable(): Promise<boolean> {
     return token() != null;
@@ -96,6 +124,10 @@ export class TelegramChannel implements Channel {
     if (!api) return;
     const me = await api.getMe();
     console.log(`[telegram] bot online as @${me.username ?? me.id}`);
+    // Advertise slash commands in the bot menu. Best-effort — don't block start.
+    api
+      .setMyCommands({ commands: SLASH_COMMANDS })
+      .catch((e: any) => console.error("[telegram] setMyCommands failed:", e?.message ?? e));
     this.polling = true;
     void this.pollLoop();
   }
@@ -109,13 +141,25 @@ export class TelegramChannel implements Channel {
     if (!api) throw new Error("TELEGRAM_BOT_TOKEN not set");
     const a = address as TelegramAddress;
     if (!msg.text) return;
-    const chunks = chunk(msg.text, 4000);
-    for (const text of chunks) {
-      await api.sendMessage({
-        chat_id: a.chatId,
-        message_thread_id: a.threadId,
-        text,
-      });
+    // Convert each chunk independently so split boundaries can't break tags.
+    const plainChunks = chunk(msg.text, 4000);
+    for (const plain of plainChunks) {
+      const html = markdownToTelegramHtml(plain);
+      try {
+        await api.sendMessage({
+          chat_id: a.chatId,
+          message_thread_id: a.threadId,
+          text: html,
+          parse_mode: "HTML",
+        });
+      } catch {
+        // Rare: malformed HTML after conversion. Fall back to plain.
+        await api.sendMessage({
+          chat_id: a.chatId,
+          message_thread_id: a.threadId,
+          text: plain,
+        });
+      }
     }
   }
 
@@ -149,19 +193,343 @@ export class TelegramChannel implements Channel {
     if (!m || !m.from) return;
     const allowed = allowedUserIds();
     if (allowed.size > 0 && !allowed.has(m.from.id)) return;
-    const chatId = m.chat.id;
-    const text = m.text ?? "";
 
-    const session = aiStore.findByTelegramChat(chatId);
-    if (session) {
-      await this.routeToSession(session.id, text, chatId);
+    const chatId = m.chat.id;
+
+    // Group → supergroup migration: rebind any AiSession that was pointing at
+    // the old chat id (this message arrives in the *old* chat with the new id).
+    if (m.migrate_to_chat_id) {
+      this.handleMigration(chatId, m.migrate_to_chat_id);
+      return;
+    }
+    // Mirror message in the new supergroup; same handling either direction.
+    if (m.migrate_from_chat_id) {
+      this.handleMigration(m.migrate_from_chat_id, chatId);
+      // Don't return — the new-chat message may also carry text we want to handle.
+    }
+
+    // Slash commands take priority over everything else.
+    const text = m.text ?? "";
+    if (text.startsWith("/")) {
+      const handled = await this.handleSlashCommand(text, chatId);
+      if (handled) return;
+    }
+
+    // Photo album (media group) — buffer and flush after a short timeout.
+    if (m.photo && m.photo.length && m.media_group_id) {
+      await this.bufferMediaGroup(m, chatId);
       return;
     }
 
+    // Single photo (no album).
+    if (m.photo && m.photo.length) {
+      const att = await this.downloadPhoto(m, chatId);
+      const text = m.caption ?? "";
+      await this.dispatch(chatId, text, att ? [att] : []);
+      return;
+    }
+
+    // Voice / audio — transcribe via STT, treat as text.
+    if (m.voice || m.audio) {
+      await this.dispatchAudio(m, chatId);
+      return;
+    }
+
+    // Document / video / video_note — path reference attachment.
+    if (m.document || m.video || m.video_note) {
+      const cap = m.caption ?? "";
+      const att = await this.downloadDocument(m, chatId);
+      await this.dispatch(chatId, cap, att ? [att] : []);
+      return;
+    }
+
+    // Plain text (already checked for slash commands above).
+    await this.dispatch(chatId, text, []);
+  }
+
+  private async dispatch(
+    chatId: number,
+    text: string,
+    attachments: Attachment[]
+  ): Promise<void> {
+    const session = aiStore.findByTelegramChat(chatId);
+    if (session) {
+      await this.routeToSession(session.id, text, chatId, attachments);
+      return;
+    }
     if (!this.pending.has(chatId)) {
-      this.pending.set(chatId, { firstMessage: text, awaitingSince: Date.now() });
+      this.pending.set(chatId, {
+        firstMessage: text,
+        attachments,
+        awaitingSince: Date.now(),
+      });
+    } else {
+      // Subsequent unbound messages append to pending content.
+      const p = this.pending.get(chatId)!;
+      if (text) p.firstMessage = p.firstMessage ? `${p.firstMessage}\n${text}` : text;
+      if (attachments.length) p.attachments = [...(p.attachments ?? []), ...attachments];
     }
     await this.sendBindingPicker(chatId);
+  }
+
+  private async dispatchAudio(m: any, chatId: number): Promise<void> {
+    const api = this.ensureApi();
+    if (!api) return;
+    const file = m.voice ?? m.audio;
+    const aiSessionId = aiStore.findByTelegramChat(chatId)?.id;
+    let transcribed = "";
+    let downloaded;
+    try {
+      downloaded = await downloadTelegramFile(api, file.file_id, {
+        aiSessionId,
+        preferredName: file.file_name ?? `voice-${file.file_id.slice(-8)}`,
+        mimeType: file.mime_type,
+      });
+      transcribed = await transcribe(downloaded.path, { mimeType: file.mime_type });
+    } catch (e: any) {
+      await api.sendMessage({
+        chat_id: chatId,
+        text: `Could not transcribe audio: ${e?.message ?? e}`,
+      });
+      return;
+    }
+    if (!transcribed) {
+      await api.sendMessage({ chat_id: chatId, text: "(audio transcribed to empty text)" });
+      return;
+    }
+    await api.sendMessage({ chat_id: chatId, text: `🎤 ${transcribed}` });
+    await this.dispatch(chatId, transcribed, []);
+  }
+
+  private async downloadPhoto(m: any, chatId: number): Promise<Attachment | null> {
+    const api = this.ensureApi();
+    if (!api || !m.photo?.length) return null;
+    const aiSessionId = aiStore.findByTelegramChat(chatId)?.id;
+    // Telegram returns multiple sizes; the largest is the last entry.
+    const largest = m.photo[m.photo.length - 1];
+    try {
+      const dl = await downloadTelegramFile(api, largest.file_id, {
+        aiSessionId,
+        preferredName: `photo-${largest.file_unique_id}.jpg`,
+        mimeType: "image/jpeg",
+      });
+      return { kind: "image", path: dl.path, filename: dl.filename, mimeType: dl.mimeType };
+    } catch {
+      return null;
+    }
+  }
+
+  private async downloadDocument(m: any, chatId: number): Promise<Attachment | null> {
+    const api = this.ensureApi();
+    if (!api) return null;
+    const file = m.document ?? m.video ?? m.video_note;
+    if (!file) return null;
+    const aiSessionId = aiStore.findByTelegramChat(chatId)?.id;
+    try {
+      const dl = await downloadTelegramFile(api, file.file_id, {
+        aiSessionId,
+        preferredName: file.file_name,
+        mimeType: file.mime_type,
+      });
+      const isImage = (file.mime_type ?? "").startsWith("image/");
+      return {
+        kind: isImage ? "image" : "document",
+        path: dl.path,
+        filename: dl.filename,
+        mimeType: dl.mimeType ?? file.mime_type,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // Buffer Telegram album messages (same media_group_id) and flush as a
+  // single dispatch after a quiet period.
+  private async bufferMediaGroup(m: any, chatId: number): Promise<void> {
+    const groupId = m.media_group_id as string;
+    let buf = this.mediaGroups.get(groupId);
+    if (!buf) {
+      buf = { chatId, caption: "", attachments: [], flushTimer: null };
+      this.mediaGroups.set(groupId, buf);
+    }
+    if (m.caption && !buf.caption) buf.caption = m.caption;
+    const att = await this.downloadPhoto(m, chatId);
+    if (att) buf.attachments.push(att);
+    if (buf.flushTimer) clearTimeout(buf.flushTimer);
+    buf.flushTimer = setTimeout(() => {
+      this.mediaGroups.delete(groupId);
+      void this.dispatch(buf!.chatId, buf!.caption, buf!.attachments);
+    }, MEDIA_GROUP_FLUSH_MS);
+  }
+
+  // When a group migrates to a supergroup, Telegram replaces the chat id.
+  // Rewrite any AiSession that pointed at the old id to use the new one.
+  private handleMigration(oldChatId: number, newChatId: number): void {
+    const ai = aiStore.findByTelegramChat(oldChatId);
+    if (!ai) return;
+    ai.channels = { ...(ai.channels ?? {}), telegram: { chatId: newChatId } };
+    aiStore.write(ai);
+    console.log(
+      `[telegram] migrated session ${ai.id.slice(0, 8)} chat ${oldChatId} → ${newChatId}`
+    );
+    // Confirm in the new chat so the user knows the binding survived.
+    const api = this.ensureApi();
+    api
+      ?.sendMessage({
+        chat_id: newChatId,
+        text: `Group migrated to supergroup; binding updated for Session ${ai.id.slice(0, 8)}.`,
+      })
+      .catch(() => {});
+  }
+
+  // Returns true if a slash command was recognized and handled. Falls through
+  // to default routing otherwise (e.g. "/path/to/file" sent as plain text).
+  private async handleSlashCommand(text: string, chatId: number): Promise<boolean> {
+    const api = this.ensureApi();
+    if (!api) return false;
+    // Strip optional @botname suffix Telegram appends in groups.
+    const [cmdRaw, ...rest] = text.trim().split(/\s+/);
+    const cmd = cmdRaw.split("@")[0].toLowerCase();
+    const arg = rest.join(" ");
+
+    if (cmd === "/help") {
+      const lines = SLASH_COMMANDS.map((c) => `/${c.command} — ${c.description}`);
+      await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
+      return true;
+    }
+
+    if (cmd === "/status") {
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (!ai) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: "Not bound. Send /bind to pick a Session.",
+        });
+        return true;
+      }
+      const lines = [
+        `Session: ${ai.id}`,
+        `Name: ${ai.name ?? "(unnamed)"}`,
+        `Provider: ${ai.provider}`,
+        `Provider session: ${ai.sessionId ?? "(not yet started)"}`,
+        `cwd: ${ai.cwd ?? "(unset)"}`,
+      ];
+      await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
+      return true;
+    }
+
+    if (cmd === "/bind") {
+      // Force re-binding by clearing the existing telegram link, then show picker.
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (ai) {
+        ai.channels = { ...(ai.channels ?? {}) };
+        delete ai.channels.telegram;
+        aiStore.write(ai);
+      }
+      this.pending.delete(chatId);
+      await this.sendBindingPicker(chatId);
+      return true;
+    }
+
+    if (cmd === "/cwd") {
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (!ai) {
+        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
+        return true;
+      }
+      if (!arg) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `cwd: ${ai.cwd ?? "(unset)"}`,
+        });
+        return true;
+      }
+      ai.cwd = arg;
+      aiStore.write(ai);
+      await api.sendMessage({ chat_id: chatId, text: `cwd set to: ${arg}` });
+      return true;
+    }
+
+    if (cmd === "/rename") {
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (!ai) {
+        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
+        return true;
+      }
+      if (arg) {
+        ai.name = arg;
+        aiStore.write(ai);
+        await api.sendMessage({ chat_id: chatId, text: `Renamed to: ${arg}` });
+        return true;
+      }
+      // No arg → ask the default agent to summarize the current transcript.
+      if (!ai.sessionId) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: "Can't auto-rename: no provider session yet (send a message first).",
+        });
+        return true;
+      }
+      const stopTyping = this.startTyping(chatId);
+      try {
+        const detail = await getProvider(ai.provider).getSession(ai.sessionId);
+        const transcript = detail.messages
+          .map((m) => `[${m.role}]\n${m.content}`)
+          .join("\n\n");
+        const { generateNameFromTranscript } = await import(
+          "../ai-sessions/naming.js"
+        );
+        const newName = await generateNameFromTranscript(transcript);
+        ai.name = newName;
+        aiStore.write(ai);
+        await api.sendMessage({ chat_id: chatId, text: `Renamed to: ${newName}` });
+      } catch (e: any) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Rename failed: ${e?.message ?? e}`,
+        });
+      } finally {
+        stopTyping();
+      }
+      return true;
+    }
+
+    if (cmd === "/skills") {
+      const ai = aiStore.findByTelegramChat(chatId);
+      const cwd = ai?.cwd ?? workspaceDir();
+      const skills = listSkills(cwd);
+      if (!skills.length) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `No skills found under ${cwd}/skills/. Add SKILL.md files to advertise them.`,
+        });
+        return true;
+      }
+      const lines = [`Skills under ${cwd}/skills/:`];
+      for (const s of skills) {
+        lines.push(`• ${s.name}${s.description ? ` — ${s.description}` : ""}`);
+      }
+      await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
+      return true;
+    }
+
+    if (cmd === "/interrupt") {
+      // Existing logic in routeToSession also handles "/interrupt" prefix; this
+      // path lets unbound chats get a clearer message.
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (!ai) {
+        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
+        return true;
+      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text: "Interrupt requested. (Only effective if a run is live in this server process.)",
+      });
+      return true;
+    }
+
+    // Unrecognized slash command — let it fall through to plain-text routing.
+    return false;
   }
 
   private async sendBindingPicker(chatId: number): Promise<void> {
@@ -203,8 +571,7 @@ export class TelegramChannel implements Channel {
       header = "Saved AiSessions:";
       entries = aiStore.list().map((s) => ({
         id: s.id,
-        label:
-          `${s.id.slice(0, 8)} · ${s.provider} · ${s.name ?? "(unnamed)"}`.slice(0, 60),
+        label: `${s.id.slice(0, 4)} · ${s.provider} · ${s.name ?? "(unnamed)"}`.slice(0, 60),
         callback: `bind:${s.id}`,
       }));
     } else {
@@ -213,7 +580,7 @@ export class TelegramChannel implements Channel {
       entries = sessions.map((s) => ({
         id: s.id,
         // Path needed for preview enrichment below.
-        label: `${s.id.slice(0, 8)} · ${s.cwd ?? ""}`.slice(0, 60),
+        label: `${s.id.slice(0, 4)} · ${s.cwd ?? ""}`.slice(0, 60),
         callback: `attach:${provider}:${s.id}`,
         path: s.path,
       })) as Array<{ id: string; label: string; callback: string; path?: string }>;
@@ -221,15 +588,17 @@ export class TelegramChannel implements Channel {
 
     const start = page * PAGE_SIZE;
     const slice = entries.slice(start, start + PAGE_SIZE);
-    // Enrich the visible slice with a first-message preview when the underlying
-    // file is JSONL (cheap single-line read). Falls back to the original label.
+    // Enrich the visible slice with a cwd hint + first-message preview from
+    // the JSONL. Cheap (one capped scan per row) — only the visible page.
     await Promise.all(
       slice.map(async (e: any) => {
         if (!e.path || !e.path.endsWith(".jsonl")) return;
-        const preview = await previewFromJsonl(e.path);
-        if (preview) {
-          e.label = `${e.id.slice(0, 8)} · ${preview}`.slice(0, 60);
-        }
+        const { text, cwd } = await previewFromJsonl(e.path);
+        const cwdHint = cwd ? shortenPath(cwd) : "";
+        const parts = [e.id.slice(0, 4)];
+        if (cwdHint) parts.push(cwdHint);
+        if (text) parts.push(text);
+        e.label = parts.join(" · ").slice(0, 60);
       })
     );
     const rows = slice.map((e) => [{ text: e.label, callback_data: e.callback }]);
@@ -324,6 +693,17 @@ export class TelegramChannel implements Channel {
       return;
     }
     s.channels = { ...(s.channels ?? {}), telegram: { chatId } };
+    // Backfill cwd for legacy AiSessions created before cwd was tracked.
+    // Provider session storage (esp. claude) is keyed by cwd; resuming with
+    // the wrong cwd surfaces "no conversation found".
+    if (!s.cwd && s.sessionId) {
+      try {
+        const detail = await getProvider(s.provider).getSession(s.sessionId);
+        if (detail.cwd) s.cwd = detail.cwd;
+      } catch {
+        /* best-effort */
+      }
+    }
     aiStore.write(s);
     await this.editTo(
       chatId,
@@ -332,8 +712,13 @@ export class TelegramChannel implements Channel {
     );
     const pending = this.pending.get(chatId);
     this.pending.delete(chatId);
-    if (pending?.firstMessage) {
-      await this.routeToSession(s.id, pending.firstMessage, chatId);
+    if (pending?.firstMessage || pending?.attachments?.length) {
+      await this.routeToSession(
+        s.id,
+        pending?.firstMessage ?? "",
+        chatId,
+        pending?.attachments ?? []
+      );
     }
   }
 
@@ -344,21 +729,37 @@ export class TelegramChannel implements Channel {
     provider: string,
     providerSessionId: string,
   ): Promise<void> {
+    // Look up the underlying session's cwd so resumes work (claude scopes
+    // session storage by directory).
+    let sessionCwd: string | undefined;
+    try {
+      const detail = await getProvider(provider).getSession(providerSessionId);
+      sessionCwd = detail.cwd;
+    } catch {
+      /* ignore */
+    }
     let ai = aiStore.findByProviderSession(provider, providerSessionId);
     if (!ai) {
-      ai = aiStore.create({ provider, sessionId: providerSessionId });
+      ai = aiStore.create({ provider, sessionId: providerSessionId, cwd: sessionCwd });
+    } else if (!ai.cwd && sessionCwd) {
+      ai.cwd = sessionCwd;
     }
     ai.channels = { ...(ai.channels ?? {}), telegram: { chatId } };
     aiStore.write(ai);
     await this.editTo(
       chatId,
       messageId,
-      `Bound to Session ${ai.id} (${provider} · ${providerSessionId.slice(0, 8)}).`,
+      `Bound to Session ${ai.id} (${provider} · ${providerSessionId.slice(0, 4)}).`,
     );
     const pending = this.pending.get(chatId);
     this.pending.delete(chatId);
-    if (pending?.firstMessage) {
-      await this.routeToSession(ai.id, pending.firstMessage, chatId);
+    if (pending?.firstMessage || pending?.attachments?.length) {
+      await this.routeToSession(
+        ai.id,
+        pending?.firstMessage ?? "",
+        chatId,
+        pending?.attachments ?? []
+      );
     }
   }
 
@@ -380,8 +781,13 @@ export class TelegramChannel implements Channel {
     );
     const pending = this.pending.get(chatId);
     this.pending.delete(chatId);
-    if (pending?.firstMessage) {
-      await this.routeToSession(ai.id, pending.firstMessage, chatId);
+    if (pending?.firstMessage || pending?.attachments?.length) {
+      await this.routeToSession(
+        ai.id,
+        pending?.firstMessage ?? "",
+        chatId,
+        pending?.attachments ?? []
+      );
     }
   }
 
@@ -407,6 +813,7 @@ export class TelegramChannel implements Channel {
     aiSessionId: string,
     text: string,
     chatId: number,
+    attachments: Attachment[] = [],
   ): Promise<void> {
     if (!this.api) return;
     const trimmed = text.trim();
@@ -417,7 +824,7 @@ export class TelegramChannel implements Channel {
       });
       return;
     }
-    if (!trimmed) return;
+    if (!trimmed && !attachments.length) return;
     const ai = aiStore.read(aiSessionId);
     if (!ai) {
       await this.api.sendMessage({ chat_id: chatId, text: "Session not found." });
@@ -425,10 +832,19 @@ export class TelegramChannel implements Channel {
     }
     const stopTyping = this.startTyping(chatId);
     const status = await this.openStatusBlock(chatId);
+    if (attachments.length) {
+      const summary = attachments
+        .map((a) => `📎 ${a.filename ?? a.path.split(/[\\/]/).pop()}`)
+        .join("\n");
+      // Surface the attachment list at the top of the status block.
+      status.push(summary);
+    }
     try {
       const handle = getProvider(ai.provider).run({
-        prompt: trimmed,
+        prompt: trimmed || "(see attachments)",
+        attachments,
         aiSessionId: ai.id,
+        cwd: workspaceDir(),
         yolo: true,
       });
       const live = getLive(handle.meta.runId);
@@ -533,14 +949,25 @@ export class TelegramChannel implements Channel {
           return;
         }
         const head = text.slice(0, 4096);
+        const headHtml = markdownToTelegramHtml(head);
         try {
           await api.editMessageText({
             chat_id: chatId,
             message_id: messageId,
-            text: head,
+            text: headHtml,
+            parse_mode: "HTML",
           });
         } catch {
-          /* ignore */
+          // HTML rejected → retry plain.
+          try {
+            await api.editMessageText({
+              chat_id: chatId,
+              message_id: messageId,
+              text: head,
+            });
+          } catch {
+            /* ignore */
+          }
         }
         if (text.length > 4096) {
           await this.send({ chatId }, { text: text.slice(4096) });

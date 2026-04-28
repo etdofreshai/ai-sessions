@@ -2,7 +2,7 @@ import express from "express";
 import type { Request, Response } from "express";
 import { getProvider, listProviderNames, providers } from "../providers/index.js";
 import { defaultYolo } from "../providers/types.js";
-import { dataDir } from "../config.js";
+import { dataDir, workspaceDir } from "../config.js";
 import {
   getLive,
   listRunIds,
@@ -27,6 +27,7 @@ export function createApp() {
       version: "0.1.0",
       yoloDefault: defaultYolo(),
       dataDir: dataDir(),
+      workspaceDir: workspaceDir(),
       docs: "/openapi.json",
       endpoints: Object.keys(openapi.paths),
     });
@@ -209,6 +210,7 @@ export function startServer(port: number) {
     console.log(`docs: http://localhost:${port}/openapi.json`);
     console.log(`YOLO default: ${defaultYolo()}`);
     console.log(`data dir: ${dataDir()}`);
+    console.log(`workspace: ${workspaceDir()}`);
   });
   // Fire and forget — channels self-skip if not configured.
   void startAvailableChannels();

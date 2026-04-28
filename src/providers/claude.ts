@@ -1,9 +1,11 @@
 import { homedir } from "node:os";
 import { join, basename } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import fg from "fast-glob";
 import { startRun } from "../runs/start.js";
 import { planAiSessionResolution } from "../ai-sessions/finalize.js";
+import { buildCatalog } from "../skills/catalog.js";
+import { loadDotenv } from "../sessions/dotenv.js";
 import type { RunHandle } from "../runs/types.js";
 import type {
   Provider,
@@ -34,6 +36,58 @@ function flattenContent(content: unknown): string {
       .join("\n");
   }
   return content == null ? "" : JSON.stringify(content);
+}
+
+function guessImageMediaType(filename?: string, mimeType?: string): string {
+  if (mimeType?.startsWith("image/")) return mimeType;
+  const ext = (filename ?? "").toLowerCase().split(".").pop();
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "jpg":
+    case "jpeg":
+    default:
+      return "image/jpeg";
+  }
+}
+
+function buildClaudeContent(
+  prompt: string,
+  attachments?: import("./types.js").Attachment[]
+): string | any[] {
+  if (!attachments || attachments.length === 0) return prompt;
+  const blocks: any[] = [];
+  // Text first, then images and document references.
+  if (prompt) blocks.push({ type: "text", text: prompt });
+  const docPaths: string[] = [];
+  for (const a of attachments) {
+    if (a.kind === "image") {
+      try {
+        const data = readFileSync(a.path).toString("base64");
+        blocks.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: guessImageMediaType(a.filename, a.mimeType),
+            data,
+          },
+        });
+      } catch {
+        docPaths.push(a.path);
+      }
+    } else {
+      docPaths.push(a.path);
+    }
+  }
+  if (docPaths.length) {
+    const tail = docPaths.map((p) => `[Attached file: ${p}]`).join("\n");
+    blocks.push({ type: "text", text: tail });
+  }
+  return blocks;
 }
 
 export const claudeProvider: Provider = {
@@ -101,14 +155,16 @@ export const claudeProvider: Provider = {
       prompt: opts.prompt,
       sessionId: opts.sessionId,
       asId: opts.aiSessionId,
+      cwd: opts.cwd,
       internal: opts.internal,
     });
     const effectiveSessionId = plan.effectiveProviderSessionId;
+    const effectiveCwd = plan.effectiveCwd;
     return startRun({
       provider: "claude",
       prompt: opts.prompt,
       sessionId: effectiveSessionId,
-      cwd: opts.cwd,
+      cwd: effectiveCwd,
       yolo,
       internal: opts.internal,
       aiSessionId: plan.preResolvedAiSessionId,
@@ -117,8 +173,12 @@ export const claudeProvider: Provider = {
       body: async ({ emit, onAbort, onSteer }) => {
         const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-        // Build a streaming user-message iterable so we can push steers.
-        const pending: string[] = [opts.prompt];
+        // Build the first user-message content. Strings stay strings; runs
+        // with attachments get a content array.
+        const firstContent = buildClaudeContent(opts.prompt, opts.attachments);
+        // Streaming pending queue: string for plain steers, content arrays for
+        // anything richer.
+        const pending: Array<string | any[]> = [firstContent];
         const closeSignal = { closed: false };
         type Resolver = () => void;
         let pushResolve: Resolver | null = null;
@@ -126,10 +186,10 @@ export const claudeProvider: Provider = {
         async function* userStream(): AsyncGenerator<any, void, unknown> {
           while (true) {
             while (pending.length) {
-              const text = pending.shift()!;
+              const content = pending.shift()!;
               yield {
                 type: "user",
-                message: { role: "user", content: text },
+                message: { role: "user", content },
                 parent_tool_use_id: null,
               };
             }
@@ -146,10 +206,25 @@ export const claudeProvider: Provider = {
           }
         });
 
+        const skillsCatalog = effectiveCwd ? buildCatalog(effectiveCwd) : "";
+        const workspaceEnv = loadDotenv(effectiveCwd);
         const stream = query({
           prompt: userStream(),
           options: {
-            cwd: opts.cwd,
+            cwd: effectiveCwd,
+            env: {
+              ...(process.env as Record<string, string>),
+              ...workspaceEnv,
+            },
+            ...(skillsCatalog
+              ? {
+                  systemPrompt: {
+                    type: "preset" as const,
+                    preset: "claude_code" as const,
+                    append: skillsCatalog,
+                  },
+                }
+              : {}),
             ...(yolo
               ? {
                   permissionMode: "bypassPermissions" as const,

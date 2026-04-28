@@ -18,19 +18,22 @@ export function planAiSessionResolution(args: {
   prompt: string;
   sessionId?: string;
   asId?: string;
+  cwd?: string;
   internal?: boolean;
 }): {
   preResolvedAiSessionId?: string;
-  // Provider sessionId to actually use for this run (auto-resolved from --as
-  // when the caller didn't supply --session). Caller should pass this to the
-  // provider SDK as the resume id.
   effectiveProviderSessionId?: string;
+  // Caller should use this cwd for the run. When resuming an existing
+  // AiSession, the stored cwd is sticky (claude scopes session storage by
+  // directory; resuming under a different cwd fails with "no conversation
+  // found").
+  effectiveCwd?: string;
   attachToMeta: (meta: RunMetadata) => Promise<void>;
 } {
   if (args.internal) {
-    // Internal runs are never auto-mapped to AiSessions.
     return {
       effectiveProviderSessionId: args.sessionId,
+      effectiveCwd: args.cwd,
       attachToMeta: async () => {},
     };
   }
@@ -41,9 +44,10 @@ export function planAiSessionResolution(args: {
     providerSessionId: args.sessionId,
   });
 
-  // If --as resolved an AiSession (always same-provider now), resume its
-  // sessionId unless caller explicitly passed --session (takes priority).
   const effectiveProviderSessionId = args.sessionId ?? pre.preexisting?.sessionId;
+  // If we're resuming a known AiSession with a recorded cwd, that wins.
+  // Fresh runs use the caller-supplied cwd.
+  const effectiveCwd = pre.preexisting?.cwd ?? args.cwd;
 
   // Brand-new AiSession path: kick off naming in parallel.
   let pendingName: Promise<string> | undefined;
@@ -54,26 +58,26 @@ export function planAiSessionResolution(args: {
   const preResolvedAiSessionId = pre.preexisting?.id;
 
   const attachToMeta = async (meta: RunMetadata): Promise<void> => {
-    if (meta.status !== "completed") return; // only attach successful runs
-    if (!meta.sessionId) return; // can't map without a provider sessionId
+    if (meta.status !== "completed") return;
+    if (!meta.sessionId) return;
     if (pre.preexisting) {
       const ai = finalizeStore({
         preexisting: pre.preexisting,
         provider: args.provider,
         providerSessionId: meta.sessionId,
+        cwd: meta.cwd ?? pre.preexisting.cwd,
         name: null,
       });
       meta.aiSessionId = ai.id;
       return;
     }
-    // Re-check by providerSessionId in case the run actually returned a known
-    // session id (rare, but covers race conditions).
     const found = store.findByProviderSession(args.provider, meta.sessionId);
     if (found) {
       const ai = finalizeStore({
         preexisting: found,
         provider: args.provider,
         providerSessionId: meta.sessionId,
+        cwd: meta.cwd ?? found.cwd,
         name: null,
       });
       meta.aiSessionId = ai.id;
@@ -84,10 +88,16 @@ export function planAiSessionResolution(args: {
       preexisting: null,
       provider: args.provider,
       providerSessionId: meta.sessionId,
+      cwd: meta.cwd,
       name,
     });
     meta.aiSessionId = ai.id;
   };
 
-  return { preResolvedAiSessionId, effectiveProviderSessionId, attachToMeta };
+  return {
+    preResolvedAiSessionId,
+    effectiveProviderSessionId,
+    effectiveCwd,
+    attachToMeta,
+  };
 }

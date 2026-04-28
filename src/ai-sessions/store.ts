@@ -118,6 +118,7 @@ export function create(args: {
   sessionId?: string;
   name?: string | null;
   model?: string;
+  cwd?: string;
 }): AiSession {
   const now = new Date().toISOString();
   const ai: AiSession = {
@@ -125,6 +126,7 @@ export function create(args: {
     name: args.name ?? null,
     provider: args.provider,
     sessionId: args.sessionId,
+    cwd: args.cwd,
     model: args.model,
     createdAt: now,
     updatedAt: now,

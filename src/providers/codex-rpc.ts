@@ -37,13 +37,14 @@ export class CodexAppServer {
     return ["codex", "app-server"];
   }
 
-  constructor(opts: { command?: string[]; cwd?: string } = {}) {
+  constructor(opts: { command?: string[]; cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
     const cmd = opts.command ?? CodexAppServer.resolveCommand();
     // On Windows, .cmd shims require shell:true to spawn correctly.
     const useShell =
       process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd[0]);
     this.child = spawn(cmd[0], cmd.slice(1), {
       cwd: opts.cwd,
+      env: opts.env,
       stdio: ["pipe", "pipe", "pipe"],
       shell: useShell,
     });

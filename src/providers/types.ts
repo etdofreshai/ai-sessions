@@ -22,16 +22,23 @@ export interface SessionDetail extends SessionSummary {
   messages: SessionMessage[];
 }
 
+export interface Attachment {
+  // "image" → passed natively when supported (claude base64 block,
+  // codex local_image item); falls back to path reference otherwise.
+  // "document" → always passed as path reference in the prompt text.
+  kind: "image" | "document";
+  path: string; // absolute path on disk
+  filename?: string;
+  mimeType?: string;
+}
+
 export interface RunOptions {
   prompt: string;
+  attachments?: Attachment[];
   sessionId?: string;
   cwd?: string;
   yolo?: boolean;
-  // If true, this run is created by ai-sessions internals (e.g. the AiSession
-  // naming call) and should NOT itself be auto-mapped to an AiSession.
   internal?: boolean;
-  // Pre-resolved AiSession id (from `--as`). If set, the run is attributed to
-  // it on completion without further lookup.
   aiSessionId?: string;
 }
 

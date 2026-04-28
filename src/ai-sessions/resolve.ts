@@ -42,17 +42,18 @@ export function finalize(args: {
   preexisting: AiSession | null;
   provider: string;
   providerSessionId: string;
+  cwd?: string;
   name: string | null;
 }): AiSession {
   if (args.preexisting) {
-    // Same-provider preexisting: just touch updatedAt and possibly update sessionId
-    // (it shouldn't change for a resume, but keep things consistent).
     args.preexisting.sessionId = args.providerSessionId;
+    if (args.cwd && !args.preexisting.cwd) args.preexisting.cwd = args.cwd;
     return store.write(args.preexisting);
   }
   return store.create({
     provider: args.provider,
     sessionId: args.providerSessionId,
+    cwd: args.cwd,
     name: args.name,
   });
 }

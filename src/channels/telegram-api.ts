@@ -17,6 +17,26 @@ export interface TgChat {
   is_forum?: boolean;
 }
 
+export interface TgPhotoSize {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
+export interface TgFile {
+  file_id: string;
+  file_unique_id: string;
+  file_size?: number;
+  mime_type?: string;
+  file_name?: string;
+}
+
+export interface TgVoice extends TgFile {
+  duration: number;
+}
+
 export interface TgMessage {
   message_id: number;
   message_thread_id?: number;
@@ -24,7 +44,18 @@ export interface TgMessage {
   chat: TgChat;
   date: number;
   text?: string;
+  caption?: string;
+  media_group_id?: string;
+  photo?: TgPhotoSize[];
+  document?: TgFile;
+  voice?: TgVoice;
+  audio?: TgFile;
+  video?: TgFile;
+  video_note?: TgFile;
   reply_to_message?: TgMessage;
+  // Service messages emitted when a basic group migrates to a supergroup.
+  migrate_to_chat_id?: number;
+  migrate_from_chat_id?: number;
 }
 
 export interface TgCallbackQuery {
@@ -71,6 +102,19 @@ export class TelegramApi {
     return this.call<TgUser>("getMe");
   }
 
+  // Two-step download: getFile returns metadata with file_path; the file is
+  // then fetched from /file/bot<TOKEN>/<file_path>.
+  getFile(file_id: string) {
+    return this.call<{ file_id: string; file_size?: number; file_path: string }>(
+      "getFile",
+      { file_id }
+    );
+  }
+
+  fileUrl(file_path: string): string {
+    return `${API_BASE}/file/bot${this.token}/${file_path}`;
+  }
+
   getUpdates(opts: { offset?: number; timeout?: number; allowed_updates?: string[] }) {
     return this.call<TgUpdate[]>("getUpdates", opts);
   }
@@ -102,6 +146,13 @@ export class TelegramApi {
 
   // Telegram shows the indicator for ~5s then auto-clears; resend every <5s
   // to keep it visible during long-running operations.
+  setMyCommands(opts: {
+    commands: { command: string; description: string }[];
+    scope?: { type: "default" | "all_private_chats" | "all_group_chats" | "all_chat_administrators" };
+  }) {
+    return this.call("setMyCommands", opts);
+  }
+
   sendChatAction(opts: {
     chat_id: number;
     action: "typing" | "upload_photo" | "record_video" | "upload_video" | "record_voice" | "upload_voice" | "upload_document" | "find_location" | "record_video_note" | "upload_video_note";

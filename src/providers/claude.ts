@@ -90,10 +90,25 @@ function buildClaudeContent(
   return blocks;
 }
 
-export const claudeProvider: Provider = {
-  name: "claude",
+export interface ClaudeFlavorConfig {
+  name: string;
+  // Extra env vars layered on top of process.env + workspace .env. Used by
+  // GLM-style flavors that point Claude Code at a different ANTHROPIC_BASE_URL
+  // and override model names. Returns null if the flavor isn't configured —
+  // listSessions will still work but `run` will refuse.
+  envOverlay?: () => Record<string, string> | null;
+  // Stricter availability check. Defaults to checking that the claude
+  // projects dir exists.
+  isAvailable?: () => boolean | Promise<boolean>;
+}
+
+export function makeClaudeFlavoredProvider(cfg: ClaudeFlavorConfig): Provider {
+  const providerName = cfg.name;
+  return {
+  name: providerName,
 
   async isAvailable() {
+    if (cfg.isAvailable) return cfg.isAvailable();
     return existsSync(projectsDir());
   },
 
@@ -107,7 +122,7 @@ export const claudeProvider: Provider = {
       const t = fileTimes(f);
       out.push({
         id,
-        provider: "claude",
+        provider: providerName,
         path: f,
         createdAt: t.createdAt,
         updatedAt: t.updatedAt,
@@ -138,7 +153,7 @@ export const claudeProvider: Provider = {
     const t = fileTimes(path);
     return {
       id,
-      provider: "claude",
+      provider: providerName,
       path,
       cwd,
       messageCount: messages.length,
@@ -151,7 +166,7 @@ export const claudeProvider: Provider = {
   run(opts: RunOptions): RunHandle {
     const yolo = opts.yolo ?? defaultYolo();
     const plan = planAiSessionResolution({
-      provider: "claude",
+      provider: providerName,
       prompt: opts.prompt,
       sessionId: opts.sessionId,
       asId: opts.aiSessionId,
@@ -161,7 +176,7 @@ export const claudeProvider: Provider = {
     const effectiveSessionId = plan.effectiveProviderSessionId;
     const effectiveCwd = plan.effectiveCwd;
     return startRun({
-      provider: "claude",
+      provider: providerName,
       prompt: opts.prompt,
       sessionId: effectiveSessionId,
       cwd: effectiveCwd,
@@ -208,6 +223,7 @@ export const claudeProvider: Provider = {
 
         const skillsCatalog = effectiveCwd ? buildCatalog(effectiveCwd) : "";
         const workspaceEnv = loadDotenv(effectiveCwd);
+        const flavorEnv = cfg.envOverlay?.() ?? {};
         const stream = query({
           prompt: userStream(),
           options: {
@@ -215,6 +231,7 @@ export const claudeProvider: Provider = {
             env: {
               ...(process.env as Record<string, string>),
               ...workspaceEnv,
+              ...flavorEnv,
             },
             ...(skillsCatalog
               ? {
@@ -297,4 +314,7 @@ export const claudeProvider: Provider = {
       },
     });
   },
-};
+  };
+}
+
+export const claudeProvider: Provider = makeClaudeFlavoredProvider({ name: "claude" });

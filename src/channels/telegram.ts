@@ -852,6 +852,9 @@ export class TelegramChannel implements Channel {
         label: which,
         displayPrompt: userPrompt || "(see attachments)",
         pipeBack: which === "agent",
+        fallbackPromptBuilder: bound?.sessionId
+          ? () => this.buildSummarizedPrompt(bound, userPrompt)
+          : undefined,
       });
       return true;
     }
@@ -1285,7 +1288,15 @@ export class TelegramChannel implements Channel {
     prompt: string,
     attachments: Attachment[],
     bound: AiSession | undefined,
-    opts: { label?: string; displayPrompt?: string; pipeBack?: boolean } = {},
+    opts: {
+      label?: string;
+      displayPrompt?: string;
+      pipeBack?: boolean;
+      // Called once if the first run fails with a "prompt too long"-style
+      // error. Should return a shorter prompt to retry with (typically a
+      // summarized transcript). Return null to give up and report the error.
+      fallbackPromptBuilder?: () => Promise<string | null>;
+    } = {},
   ): Promise<void> {
     const api = this.ensureApi();
     if (!api) return;
@@ -1328,37 +1339,55 @@ export class TelegramChannel implements Channel {
         events: [],
       };
       this.lastTrace.set(chatId, trace);
-      const handle = getProvider(provider).run({
-        prompt: prompt || "(see attachments)",
-        attachments,
-        cwd: cwd ?? workspaceDir(),
-        yolo: true,
-      });
-      const live = getLive(handle.meta.runId);
-      const watcher = (async () => {
-        if (!live) return;
-        for await (const ev of live.events) {
-          if (ev.type === "tool_use") {
-            const inputStr = formatToolInput(ev.input);
-            lines.push(`🔧 ${ev.name}${inputStr ? `: ${inputStr}` : ""}`);
-            trace.events.push({ ts: Date.now(), type: "tool_use", name: ev.name, input: ev.input });
-          } else if (ev.type === "tool_result") {
-            const last = lines[lines.length - 1];
-            if (last && last.startsWith("🔧 ")) {
-              lines[lines.length - 1] = last.replace(/^🔧/, "✓");
+      const attempt = async (p: string) => {
+        const handle = getProvider(provider).run({
+          prompt: p || "(see attachments)",
+          attachments,
+          cwd: cwd ?? workspaceDir(),
+          yolo: true,
+        });
+        const live = getLive(handle.meta.runId);
+        const watcher = (async () => {
+          if (!live) return;
+          for await (const ev of live.events) {
+            if (ev.type === "tool_use") {
+              const inputStr = formatToolInput(ev.input);
+              lines.push(`🔧 ${ev.name}${inputStr ? `: ${inputStr}` : ""}`);
+              trace.events.push({ ts: Date.now(), type: "tool_use", name: ev.name, input: ev.input });
+            } else if (ev.type === "tool_result") {
+              const last = lines[lines.length - 1];
+              if (last && last.startsWith("🔧 ")) {
+                lines[lines.length - 1] = last.replace(/^🔧/, "✓");
+              }
+              trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
+            } else if (ev.type === "error") {
+              console.error("[telegram] sub-agent run error event:", ev.message);
+              lines.push(`❌ ${ev.message}`);
+              trace.events.push({ ts: Date.now(), type: "error", message: ev.message });
             }
-            trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
-          } else if (ev.type === "error") {
-            console.error("[telegram] sub-agent run error event:", ev.message);
-            lines.push(`❌ ${ev.message}`);
-            trace.events.push({ ts: Date.now(), type: "error", message: ev.message });
+            if (lines.length > MAX_LINES) lines.splice(1, lines.length - MAX_LINES);
+            schedule();
           }
-          if (lines.length > MAX_LINES) lines.splice(1, lines.length - MAX_LINES);
-          schedule();
+        })();
+        const m = await handle.done;
+        await watcher;
+        return m;
+      };
+
+      let meta = await attempt(prompt);
+      // If the first run blew the context window, ask the caller for a shorter
+      // prompt (typically a summarized transcript) and try once more.
+      if (meta.error && isContextOverflow(meta.error) && opts.fallbackPromptBuilder) {
+        lines.push("♻️ context too long — summarizing and retrying…");
+        if (lines.length > MAX_LINES) lines.splice(1, lines.length - MAX_LINES);
+        schedule();
+        try {
+          const fallback = await opts.fallbackPromptBuilder();
+          if (fallback) meta = await attempt(fallback);
+        } catch (e: any) {
+          console.error("[telegram] fallback prompt builder failed:", e?.message ?? e);
         }
-      })();
-      const meta = await handle.done;
-      await watcher;
+      }
       if (meta.error) console.error("[telegram] sub-agent run failed:", meta.error);
       if (pending) {
         clearTimeout(pending);
@@ -1443,6 +1472,36 @@ export class TelegramChannel implements Channel {
     } catch {
       this.chatNameCache.set(chatId, "");
       return "";
+    }
+  }
+
+  // Builds a prompt that prefixes a SUMMARY of the bound session's transcript
+  // (instead of the full transcript). Used as a fallback when the full-prompt
+  // version overflows the context window.
+  private async buildSummarizedPrompt(
+    bound: AiSession,
+    userPrompt: string,
+  ): Promise<string | null> {
+    if (!bound.sessionId) return null;
+    try {
+      const detail = await getProvider(bound.provider).getSession(bound.sessionId);
+      const transcript = detail.messages
+        .map((mm) => `[${mm.role}]\n${mm.content}`)
+        .join("\n\n");
+      const { summarizeTranscript } = await import("../ai-sessions/summarize.js");
+      const summary = await summarizeTranscript(transcript);
+      return [
+        "You are a side agent answering a question about an ongoing Telegram conversation. The full transcript was too long to include — here is a summary instead. Answer the user's question directly.",
+        "",
+        "--- transcript summary ---",
+        summary,
+        "--- end summary ---",
+        "",
+        userPrompt,
+      ].join("\n");
+    } catch (e: any) {
+      console.error("[telegram] buildSummarizedPrompt failed:", e?.message ?? e);
+      return null;
     }
   }
 
@@ -1738,6 +1797,19 @@ function stringifyOutput(v: unknown): string {
   if (v == null) return "";
   if (typeof v === "string") return v;
   return safeStringify(v);
+}
+
+function isContextOverflow(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const m = message.toLowerCase();
+  return (
+    m.includes("prompt is too long") ||
+    m.includes("input is too long") ||
+    m.includes("context length") ||
+    m.includes("token limit") ||
+    m.includes("max_tokens") ||
+    m.includes("too many tokens")
+  );
 }
 
 function shortStamp(d: Date = new Date()): string {

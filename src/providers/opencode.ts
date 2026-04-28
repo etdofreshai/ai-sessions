@@ -102,6 +102,11 @@ export const opencodeProvider: Provider = {
         const args = ["run", fullPrompt];
         if (effectiveSessionId) args.push("--session", effectiveSessionId);
         if (yolo) args.push("--yolo");
+        // opencode calls reasoning effort "variant"; values are provider-
+        // specific (e.g. low/medium/high/xhigh for OpenAI). Pass through
+        // verbatim — if the underlying model doesn't accept it, opencode
+        // will surface the error.
+        if (opts.effort) args.push("--variant", opts.effort);
 
         return new Promise<{ output: string; sessionId?: string }>((resolve, reject) => {
           const workspaceEnv = loadDotenv(effectiveCwd);

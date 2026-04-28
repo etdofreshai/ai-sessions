@@ -1,0 +1,20 @@
+node_modules
+dist
+
+# Local data — never bake into the image.
+.env
+.env.local
+runs
+sessions
+uploads
+workspace
+
+.git
+.gitignore
+.dockerignore
+Dockerfile
+
+*.log
+.DS_Store
+.vscode
+.idea

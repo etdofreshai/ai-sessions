@@ -6,6 +6,9 @@ import { port as defaultPort } from "./config.js";
 import { getLive, listRunIds, loadFromDisk } from "./runs/registry.js";
 import * as aiStore from "./ai-sessions/store.js";
 import { channels as channelRegistry, listChannelNames } from "./channels/index.js";
+import * as cronStore from "./crons/store.js";
+import { makeJob, nextFireAfter } from "./crons/scheduler.js";
+import type { CronJob } from "./crons/types.js";
 
 const program = new Command();
 program
@@ -285,11 +288,110 @@ program
     }
   });
 
+const crons = program.command("crons").description("Manage scheduled jobs");
+
+crons
+  .command("ls")
+  .description("List cron jobs")
+  .option("--json", "output JSON")
+  .action((opts: { json?: boolean }) => {
+    const all = cronStore.list();
+    if (opts.json) {
+      console.log(JSON.stringify(all, null, 2));
+      return;
+    }
+    for (const j of all) {
+      const flag = j.enabled ? "on " : "off";
+      console.log(`${flag}  ${j.name}  ${j.cron}  next=${j.nextRunAt}  ${j.target.kind}`);
+    }
+  });
+
+crons
+  .command("add-session <name> <cron> <aiSessionId> <prompt>")
+  .description("Schedule a prompt to be sent to an AiSession")
+  .option("-c, --cwd <dir>", "working directory override")
+  .option("-z, --tz <tz>", "IANA timezone (e.g. America/Los_Angeles)")
+  .option("-m, --missed <policy>", "skip|run_once|run_all", "skip")
+  .action(
+    (
+      name: string,
+      cron: string,
+      aiSessionId: string,
+      prompt: string,
+      opts: { cwd?: string; tz?: string; missed?: CronJob["missedPolicy"] }
+    ) => {
+      const job = makeJob({
+        name,
+        cron,
+        timezone: opts.tz,
+        missedPolicy: opts.missed,
+        target: { kind: "ai_session", aiSessionId, prompt, cwd: opts.cwd },
+      });
+      cronStore.write(job);
+      console.log(`added: ${job.name}  next=${job.nextRunAt}`);
+    }
+  );
+
+crons
+  .command("add-command <name> <cron> <command> [args...]")
+  .description("Schedule a shell command")
+  .option("-c, --cwd <dir>", "working directory")
+  .option("-z, --tz <tz>", "IANA timezone")
+  .action(
+    (
+      name: string,
+      cron: string,
+      command: string,
+      args: string[],
+      opts: { cwd?: string; tz?: string }
+    ) => {
+      const job = makeJob({
+        name,
+        cron,
+        timezone: opts.tz,
+        target: { kind: "command", command, args, cwd: opts.cwd },
+      });
+      cronStore.write(job);
+      console.log(`added: ${job.name}  next=${job.nextRunAt}`);
+    }
+  );
+
+crons
+  .command("rm <name>")
+  .description("Remove a cron job")
+  .action((name: string) => {
+    const ok = cronStore.remove(name);
+    if (!ok) {
+      console.error(`cron not found: ${name}`);
+      process.exit(1);
+    }
+    console.log("removed");
+  });
+
+crons
+  .command("toggle <name>")
+  .description("Enable or disable a cron job")
+  .action((name: string) => {
+    const j = cronStore.read(name);
+    if (!j) {
+      console.error(`cron not found: ${name}`);
+      process.exit(1);
+    }
+    j.enabled = !j.enabled;
+    if (j.enabled) {
+      j.nextRunAt = nextFireAfter(j.cron, new Date(), j.timezone).toISOString();
+    }
+    cronStore.write(j);
+    console.log(j.enabled ? "enabled" : "disabled");
+  });
+
 program
   .command("serve")
   .description("Start the local HTTP API")
   .option("-p, --port <port>", "port", (v) => parseInt(v, 10), defaultPort())
-  .action((opts: { port: number }) => {
+  .action(async (opts: { port: number }) => {
+    const { startScheduler } = await import("./crons/scheduler.js");
+    startScheduler();
     startServer(opts.port);
   });
 

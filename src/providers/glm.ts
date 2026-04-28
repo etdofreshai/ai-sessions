@@ -37,6 +37,17 @@ function loadEnvBlock(): Record<string, string> | null {
     for (const [k, v] of Object.entries(env)) {
       if (typeof v === "string") out[k] = v;
     }
+    // Clear competing auth signals so claude-code can't fall back to a
+    // cached OAuth token or a parent-env Anthropic API key. With these
+    // empty, only ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL from the
+    // settings file have a say.
+    out.ANTHROPIC_API_KEY = "";
+    out.CLAUDE_CODE_OAUTH_TOKEN = "";
+    const baseUrl = out.ANTHROPIC_BASE_URL ?? "(unset)";
+    const tokenPreview = (out.ANTHROPIC_AUTH_TOKEN ?? "").slice(0, 6);
+    console.error(
+      `[glm] env overlay applied: ANTHROPIC_BASE_URL=${baseUrl} ANTHROPIC_AUTH_TOKEN=${tokenPreview}…`
+    );
     return out;
   } catch (e: any) {
     console.error(`[glm] failed to parse ${p}: ${e?.message ?? e}`);

@@ -16,6 +16,9 @@ export interface AiSession {
   cwd?: string;
   model?: string;
   channels?: SessionChannelBindings;
+  // When true, mirror new entries from the provider session's transcript file
+  // into the bound channel(s). Off by default — opt-in via /watch.
+  watch?: boolean;
   createdAt: string;
   updatedAt: string;
 }

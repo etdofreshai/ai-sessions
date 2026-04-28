@@ -7,6 +7,7 @@ import { previewFromJsonl, shortenPath } from "../sessions/preview.js";
 import { markdownToTelegramHtml } from "./telegram-format.js";
 import { downloadTelegramFile } from "./telegram-download.js";
 import * as remoteControl from "./remote-control.js";
+import * as sessionWatcher from "./session-watcher.js";
 import { transcribe } from "./stt.js";
 import type { Attachment } from "../providers/types.js";
 import {
@@ -30,6 +31,8 @@ const SLASH_COMMANDS = [
   { command: "new", description: "Start a new session on the current provider and bind this chat" },
   { command: "fork", description: "Fork the bound session to another provider: /fork <provider>" },
   { command: "remote", description: "Toggle claude remote-control: /remote [true|false]" },
+  { command: "watch", description: "Mirror new entries from this claude session into the chat" },
+  { command: "unwatch", description: "Stop mirroring entries from this claude session" },
   { command: "cwd", description: "Show or set the bound session's cwd" },
   { command: "rename", description: "Rename the bound session (no arg = auto-summarize)" },
   { command: "skills", description: "List enabled skills in the workspace" },
@@ -153,6 +156,7 @@ export class TelegramChannel implements Channel {
     console.log(`[telegram] bot online as @${me.username ?? me.id}`);
     // Advertise slash commands in the bot menu. Best-effort — don't block start.
     remoteControl.installShutdownHook();
+    this.restoreWatchers();
     api
       .setMyCommands({ commands: SLASH_COMMANDS })
       .catch((e: any) => console.error("[telegram] setMyCommands failed:", e?.message ?? e));
@@ -162,6 +166,7 @@ export class TelegramChannel implements Channel {
 
   async stop(): Promise<void> {
     this.polling = false;
+    sessionWatcher.stopAll();
   }
 
   async send(address: ChannelAddress, msg: ChannelMessage): Promise<void> {
@@ -480,6 +485,7 @@ export class TelegramChannel implements Channel {
         await api.sendMessage({ chat_id: chatId, text: "Not bound." });
         return true;
       }
+      sessionWatcher.stop(ai.id);
       ai.channels = { ...(ai.channels ?? {}) };
       delete ai.channels.telegram;
       aiStore.write(ai);
@@ -566,6 +572,39 @@ export class TelegramChannel implements Channel {
         chat_id: chatId,
         text: "Usage: /remote [true|false]",
       });
+      return true;
+    }
+
+    if (cmd === "/watch") {
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (!ai) {
+        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
+        return true;
+      }
+      const r = await sessionWatcher.start(ai, this.makeForwardFn(chatId));
+      if (!r.ok) {
+        await api.sendMessage({ chat_id: chatId, text: `Watch failed: ${r.error}` });
+        return true;
+      }
+      ai.watch = true;
+      aiStore.write(ai);
+      await api.sendMessage({
+        chat_id: chatId,
+        text: "Watching this session — new entries will mirror here.",
+      });
+      return true;
+    }
+
+    if (cmd === "/unwatch") {
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (!ai) {
+        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
+        return true;
+      }
+      sessionWatcher.stop(ai.id);
+      ai.watch = false;
+      aiStore.write(ai);
+      await api.sendMessage({ chat_id: chatId, text: "Stopped watching." });
       return true;
     }
 
@@ -1278,6 +1317,25 @@ export class TelegramChannel implements Channel {
     }
   }
 
+  // Builds the forwarder used by session-watcher: pretty-prints role+text
+  // and pushes it to the bound chat. Long messages are chunked by send().
+  private makeForwardFn(chatId: number): sessionWatcher.ForwardFn {
+    return (role, text) => {
+      const prefix = role === "user" ? "👤" : "🤖";
+      void this.send({ chatId }, { text: `${prefix} ${text}` });
+    };
+  }
+
+  // On startup, resume watchers for every AiSession that opted in via /watch.
+  private restoreWatchers(): void {
+    for (const ai of aiStore.list()) {
+      if (!ai.watch) continue;
+      const chatId = ai.channels?.telegram?.chatId;
+      if (!chatId) continue;
+      void sessionWatcher.start(ai, this.makeForwardFn(chatId));
+    }
+  }
+
   // Look up the human-readable name for a chat id (group title or user first
   // name), with an in-memory cache. Returns "" if it can't be resolved.
   private async resolveChatName(chatId: number): Promise<string> {
@@ -1352,6 +1410,9 @@ export class TelegramChannel implements Channel {
       // Surface the attachment list at the top of the status block.
       status.push(summary);
     }
+    // Suppress the watcher for the duration of this run — anything our run
+    // appends to the JSONL will already be shown via the status block.
+    const unmute = sessionWatcher.mute(ai.id);
     try {
       const handle = getProvider(ai.provider).run({
         prompt: trimmed || "(see attachments)",
@@ -1386,6 +1447,7 @@ export class TelegramChannel implements Channel {
       await status.finalize(`Error: ${e?.message ?? e}`);
     } finally {
       stopTyping();
+      unmute();
     }
   }
 

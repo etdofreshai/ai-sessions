@@ -40,6 +40,8 @@ export interface RunOptions {
   yolo?: boolean;
   internal?: boolean;
   aiSessionId?: string;
+  // Reasoning effort hint. Honored by providers that support it (claude).
+  effort?: "low" | "medium" | "high" | "xhigh";
 }
 
 export function defaultYolo(): boolean {

@@ -15,6 +15,10 @@ export interface AiSession {
   // session storage by directory.
   cwd?: string;
   model?: string;
+  // Reasoning effort for runs on this session — passed through to the
+  // provider when supported (claude). Falls back to AI_SESSIONS_DEFAULT_EFFORT
+  // (and ultimately "low") when unset.
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   channels?: SessionChannelBindings;
   // When true, mirror new entries from the provider session's transcript file
   // into the bound channel(s). Off by default — opt-in via /watch.

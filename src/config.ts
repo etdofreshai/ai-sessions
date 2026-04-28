@@ -27,6 +27,16 @@ export function defaultAgent(): string {
   return process.env.AI_SESSIONS_DEFAULT_AGENT || "claude";
 }
 
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+const EFFORT_VALUES: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
+export function isReasoningEffort(v: unknown): v is ReasoningEffort {
+  return typeof v === "string" && (EFFORT_VALUES as string[]).includes(v);
+}
+export function defaultReasoningEffort(): ReasoningEffort {
+  const v = process.env.AI_SESSIONS_DEFAULT_EFFORT?.toLowerCase();
+  return isReasoningEffort(v) ? v : "low";
+}
+
 // The directory agents should run inside by default (mainly for
 // channel-driven runs where the caller has no cwd of its own).
 //

@@ -238,6 +238,7 @@ export const claudeProvider: Provider = {
             ...(process.env.CLAUDE_CODE_EXECUTABLE
               ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE }
               : {}),
+            ...(opts.effort ? { effort: opts.effort } : {}),
             ...(effectiveSessionId ? { resume: effectiveSessionId } : {}),
           },
         });

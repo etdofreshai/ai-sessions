@@ -1,7 +1,7 @@
 import * as aiStore from "../ai-sessions/store.js";
 import { getProvider, listProviderNames } from "../providers/index.js";
 import { getLive } from "../runs/registry.js";
-import { workspaceDir } from "../config.js";
+import { workspaceDir, defaultReasoningEffort, isReasoningEffort } from "../config.js";
 import { listSkills } from "../skills/catalog.js";
 import { previewFromJsonl, shortenPath } from "../sessions/preview.js";
 import { markdownToTelegramHtml } from "./telegram-format.js";
@@ -31,6 +31,7 @@ const SLASH_COMMANDS = [
   { command: "new", description: "Start a new session on the current provider and bind this chat" },
   { command: "fork", description: "Fork the bound session to another provider: /fork <provider>" },
   { command: "remote", description: "Toggle claude remote-control: /remote [true|false]" },
+  { command: "effort", description: "Set reasoning effort: /effort [low|medium|high|xhigh]" },
   { command: "watch", description: "Mirror new entries from this claude session into the chat" },
   { command: "unwatch", description: "Stop mirroring entries from this claude session" },
   { command: "cwd", description: "Show or set the bound session's cwd" },
@@ -595,6 +596,34 @@ export class TelegramChannel implements Channel {
         chat_id: chatId,
         text: "Usage: /remote [true|false]",
       });
+      return true;
+    }
+
+    if (cmd === "/effort") {
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (!ai) {
+        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
+        return true;
+      }
+      const a = arg.trim().toLowerCase();
+      if (!a) {
+        const eff = ai.reasoningEffort ?? defaultReasoningEffort();
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Reasoning effort: ${eff}${ai.reasoningEffort ? "" : " (default)"}`,
+        });
+        return true;
+      }
+      if (!isReasoningEffort(a)) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: "Usage: /effort [low|medium|high|xhigh]",
+        });
+        return true;
+      }
+      ai.reasoningEffort = a;
+      aiStore.write(ai);
+      await api.sendMessage({ chat_id: chatId, text: `Reasoning effort set to: ${a}` });
       return true;
     }
 
@@ -1492,6 +1521,7 @@ export class TelegramChannel implements Channel {
         // tree. Falls back to the global workspaceDir for unscoped sessions.
         cwd: ai.cwd ?? workspaceDir(),
         yolo: true,
+        effort: ai.reasoningEffort ?? defaultReasoningEffort(),
       });
       const live = getLive(handle.meta.runId);
       const watcher = (async () => {

@@ -6,7 +6,8 @@
 #
 # Provider auth state lives in $HOME/.claude, $HOME/.codex,
 # $HOME/.local/share/opencode — mount those as volumes from the host if you
-# want runs to inherit your local login.
+# want runs to inherit your local login. The container runs as the non-root
+# `node` user (uid 1000), so $HOME is /home/node.
 
 FROM node:22-slim
 
@@ -22,14 +23,17 @@ RUN apt-get update \
         opencode-ai
 
 WORKDIR /app
+RUN chown node:node /app
+
+USER node
 
 # Install project deps first (cache-friendly).
-COPY package.json package-lock.json* ./
+COPY --chown=node:node package.json package-lock.json* ./
 RUN npm ci
 
 # Copy source and build.
-COPY tsconfig.json ./
-COPY src ./src
+COPY --chown=node:node tsconfig.json ./
+COPY --chown=node:node src ./src
 RUN npm run build
 
 # Default paths inside the container — override at runtime as needed.
@@ -40,14 +44,13 @@ ENV AI_SESSIONS_PORT=7878
 EXPOSE 7878
 
 # Persistence + agent auth state. Mount each from the host if desired:
-#   docker run -v $HOME/.claude:/root/.claude
-#              -v $HOME/.codex:/root/.codex
-#              -v $HOME/.local/share/opencode:/root/.local/share/opencode
+#   docker run -v $HOME/.claude:/home/node/.claude
+#              -v $HOME/.codex:/home/node/.codex
+#              -v $HOME/.local/share/opencode:/home/node/.local/share/opencode
 #              -v ./.ai-sessions:/app/data
 #              -v ./workspace:/app/workspace
 #              -p 7878:7878
 #              --env-file .env
 #              ai-sessions
-VOLUME ["/app/data", "/app/workspace", "/root/.claude", "/root/.codex", "/root/.local/share/opencode"]
 
 CMD ["node", "dist/cli.js", "serve"]

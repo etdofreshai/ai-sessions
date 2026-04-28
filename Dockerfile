@@ -29,7 +29,13 @@ USER node
 
 # Install project deps first (cache-friendly).
 COPY --chown=node:node package.json package-lock.json* ./
-RUN npm ci
+# `npm ci` skips the platform-specific native binary the agent-sdk needs when
+# the lockfile was generated on a host without libc metadata (e.g. Windows).
+# Pin and install the glibc Linux x64 binary explicitly afterward so the
+# `claude` runtime can be located inside the container.
+RUN npm ci \
+    && SDK_VERSION=$(node -p "require('@anthropic-ai/claude-agent-sdk/package.json').version") \
+    && npm install --no-save "@anthropic-ai/claude-agent-sdk-linux-x64@$SDK_VERSION"
 
 # Copy source and build.
 COPY --chown=node:node tsconfig.json ./

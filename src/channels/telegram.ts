@@ -1801,6 +1801,9 @@ function stringifyOutput(v: unknown): string {
 
 function isContextOverflow(message: string | null | undefined): boolean {
   if (!message) return false;
+  // Cap the keyword check to short error messages — a long stack trace that
+  // incidentally mentions "context" or "tokens" shouldn't trigger a retry.
+  if (message.length > 500) return false;
   const m = message.toLowerCase();
   return (
     m.includes("prompt is too long") ||

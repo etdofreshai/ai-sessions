@@ -23,22 +23,29 @@ export class CodexAppServer {
   private closed = false;
   private exitPromise: Promise<number | null>;
 
-  static resolveCommand(): string[] {
+  static resolveCommand(extraGlobalArgs: string[] = []): string[] {
     const override = process.env.CODEX_BIN;
-    if (override) return [override, "app-server"];
+    const insertGlobal = (bin: string) => [bin, ...extraGlobalArgs, "app-server"];
+    if (override) return insertGlobal(override);
     const candidates =
       process.platform === "win32"
         ? ["codex.cmd", "codex.exe", "codex"]
         : ["codex"];
     for (const name of candidates) {
       const found = whichSync(name);
-      if (found) return [found, "app-server"];
+      if (found) return insertGlobal(found);
     }
-    return ["codex", "app-server"];
+    return insertGlobal("codex");
   }
 
-  constructor(opts: { command?: string[]; cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
-    const cmd = opts.command ?? CodexAppServer.resolveCommand();
+  constructor(opts: { command?: string[]; cwd?: string; env?: NodeJS.ProcessEnv; configOverrides?: Record<string, string> } = {}) {
+    // Build `-c key=value` global args from configOverrides if no explicit
+    // command was provided.
+    const extra: string[] = [];
+    for (const [k, v] of Object.entries(opts.configOverrides ?? {})) {
+      extra.push("-c", `${k}=${v}`);
+    }
+    const cmd = opts.command ?? CodexAppServer.resolveCommand(extra);
     // On Windows, .cmd shims require shell:true to spawn correctly.
     const useShell =
       process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd[0]);

@@ -128,9 +128,12 @@ export const codexProvider: Provider = {
       steerable: true,
       body: async ({ emit, onAbort, onSteer }) => {
         const workspaceEnv = loadDotenv(effectiveCwd);
+        const configOverrides: Record<string, string> = {};
+        if (opts.effort) configOverrides.model_reasoning_effort = opts.effort;
         const client = new CodexAppServer({
           cwd: effectiveCwd,
           env: { ...process.env, ...workspaceEnv },
+          configOverrides,
         });
         try {
           await client.request("initialize", {

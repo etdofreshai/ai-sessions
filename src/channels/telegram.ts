@@ -1320,6 +1320,7 @@ export class TelegramChannel implements Channel {
             }
             trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
           } else if (ev.type === "error") {
+            console.error("[telegram] sub-agent run error event:", ev.message);
             lines.push(`❌ ${ev.message}`);
             trace.events.push({ ts: Date.now(), type: "error", message: ev.message });
           }
@@ -1329,6 +1330,7 @@ export class TelegramChannel implements Channel {
       })();
       const meta = await handle.done;
       await watcher;
+      if (meta.error) console.error("[telegram] sub-agent run failed:", meta.error);
       if (pending) {
         clearTimeout(pending);
         pending = null;
@@ -1368,6 +1370,7 @@ export class TelegramChannel implements Channel {
         void this.routeToSession(bound.id, memo, chatId, []);
       }
     } catch (e: any) {
+      console.error("[telegram] runSubAgent error:", e?.stack ?? e?.message ?? e);
       if (statusId != null) {
         await api.deleteMessage({ chat_id: chatId, message_id: statusId }).catch(() => {});
       }
@@ -1503,6 +1506,7 @@ export class TelegramChannel implements Channel {
             status.markLastDone();
             trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
           } else if (ev.type === "error") {
+            console.error("[telegram] route run error event:", ev.message);
             status.push(`❌ ${ev.message}`);
             trace.events.push({ ts: Date.now(), type: "error", message: ev.message });
           }
@@ -1511,6 +1515,7 @@ export class TelegramChannel implements Channel {
 
       const meta = await handle.done;
       await watcher; // make sure all events are reflected
+      if (meta.error) console.error("[telegram] route run failed:", meta.error);
       const finalText =
         meta.output?.trim() ||
         (meta.error ? `Run failed: ${meta.error}` : "(no output)");
@@ -1518,6 +1523,7 @@ export class TelegramChannel implements Channel {
       trace.finishedAt = Date.now();
       await status.finalize(finalText);
     } catch (e: any) {
+      console.error("[telegram] routeToSession error:", e?.stack ?? e?.message ?? e);
       trace.finalText = `Error: ${e?.message ?? e}`;
       trace.finishedAt = Date.now();
       await status.finalize(`Error: ${e?.message ?? e}`);

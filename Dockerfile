@@ -27,9 +27,18 @@ RUN chown node:node /app
 
 USER node
 
-# Install Claude Code via the official native installer so the agent-sdk
-# can be pointed at a real binary. Lands at /home/node/.local/bin/claude.
-RUN curl -fsSL https://claude.ai/install.sh | bash
+# Install Claude Code's native binary directly. The official install.sh
+# downloads to a temp path, runs `claude install` to create a launcher in
+# ~/.local/bin/claude, then deletes the temp — but that launcher step is
+# unreliable in non-interactive Docker builds. Mimic the download steps
+# manually and drop the binary into a stable location ourselves.
+RUN set -eux \
+    && mkdir -p /home/node/.local/bin \
+    && CC_VERSION=$(curl -fsSL https://downloads.claude.ai/claude-code-releases/latest) \
+    && curl -fsSL "https://downloads.claude.ai/claude-code-releases/$CC_VERSION/linux-x64/claude" \
+        -o /home/node/.local/bin/claude \
+    && chmod +x /home/node/.local/bin/claude \
+    && /home/node/.local/bin/claude --version
 
 # Install project deps first (cache-friendly).
 COPY --chown=node:node package.json package-lock.json* ./

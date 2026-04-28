@@ -231,6 +231,13 @@ export const claudeProvider: Provider = {
                   allowDangerouslySkipPermissions: true,
                 }
               : {}),
+            // Override path to the claude CLI when set — needed in container
+            // images where the agent-sdk's bundled native binary isn't
+            // available (e.g. cross-libc lockfile). Falls back to the SDK's
+            // own resolution when the env var is unset.
+            ...(process.env.CLAUDE_CODE_EXECUTABLE
+              ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE }
+              : {}),
             ...(effectiveSessionId ? { resume: effectiveSessionId } : {}),
           },
         });

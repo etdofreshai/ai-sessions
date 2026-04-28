@@ -37,6 +37,7 @@ const SLASH_COMMANDS = [
   { command: "rename", description: "Rename the bound session (no arg = auto-summarize)" },
   { command: "skills", description: "List enabled skills in the workspace" },
   { command: "interrupt", description: "Interrupt the current run (best-effort)" },
+  { command: "trace", description: "Show full detail of the last run (tools, inputs, outputs, reply)" },
   { command: "export", description: "Export the bound session's transcript as Markdown" },
   { command: "agent", description: "Run a one-shot sub-agent: /agent [<provider>] prompt" },
   { command: "btw", description: "Side question with full chat context, doesn't touch the bound session" },
@@ -65,6 +66,25 @@ interface ChatInbox {
   text: string;
   attachments: Attachment[];
   timer: NodeJS.Timeout | null;
+}
+
+interface TraceEvent {
+  ts: number;
+  type: "tool_use" | "tool_result" | "error";
+  name?: string;
+  input?: unknown;
+  output?: unknown;
+  message?: string;
+}
+
+interface TraceRecord {
+  source: "route" | "agent" | "btw";
+  label?: string;
+  prompt: string;
+  startedAt: number;
+  finishedAt?: number;
+  events: TraceEvent[];
+  finalText?: string;
 }
 
 function token(): string | null {
@@ -136,6 +156,9 @@ export class TelegramChannel implements Channel {
   // chatId → display name (group title or user first_name). Cached so the
   // picker doesn't pound getChat on every page render.
   private chatNameCache = new Map<number, string>();
+  // chatId → most recent run trace (full tool inputs/outputs + final reply).
+  // Overwritten on each new run so /trace shows the latest activity.
+  private lastTrace = new Map<number, TraceRecord>();
 
   async isAvailable(): Promise<boolean> {
     return token() != null;
@@ -842,6 +865,30 @@ export class TelegramChannel implements Channel {
       return true;
     }
 
+    if (cmd === "/trace") {
+      const trace = this.lastTrace.get(chatId);
+      if (!trace) {
+        await api.sendMessage({ chat_id: chatId, text: "No run trace yet for this chat." });
+        return true;
+      }
+      const md = renderTraceMarkdown(trace);
+      // Telegram message cap is ~4096; if we'd blow it, send as a file.
+      if (md.length <= 3800) {
+        await this.send({ chatId }, { text: md });
+      } else {
+        await api.sendDocument({
+          chat_id: chatId,
+          file: {
+            bytes: Buffer.from(md, "utf8"),
+            filename: `trace-${new Date().toISOString().replace(/[:.]/g, "-")}.md`,
+            mimeType: "text/markdown",
+          },
+          caption: `Trace: ${trace.events.length} events${trace.finalText ? `, response ${trace.finalText.length} chars` : " (in progress)"}`,
+        });
+      }
+      return true;
+    }
+
     if (cmd === "/interrupt") {
       // Existing logic in routeToSession also handles "/interrupt" prefix; this
       // path lets unbound chats get a clearer message.
@@ -1244,6 +1291,14 @@ export class TelegramChannel implements Channel {
       const sent = await api.sendMessage({ chat_id: chatId, text: render() });
       statusId = sent.message_id;
       lastEditAt = Date.now();
+      const trace: TraceRecord = {
+        source: label === "btw" ? "btw" : "agent",
+        label,
+        prompt: opts.displayPrompt ?? (prompt || "(see attachments)"),
+        startedAt: Date.now(),
+        events: [],
+      };
+      this.lastTrace.set(chatId, trace);
       const handle = getProvider(provider).run({
         prompt: prompt || "(see attachments)",
         attachments,
@@ -1257,13 +1312,16 @@ export class TelegramChannel implements Channel {
           if (ev.type === "tool_use") {
             const inputStr = formatToolInput(ev.input);
             lines.push(`🔧 ${ev.name}${inputStr ? `: ${inputStr}` : ""}`);
+            trace.events.push({ ts: Date.now(), type: "tool_use", name: ev.name, input: ev.input });
           } else if (ev.type === "tool_result") {
             const last = lines[lines.length - 1];
             if (last && last.startsWith("🔧 ")) {
               lines[lines.length - 1] = last.replace(/^🔧/, "✓");
             }
+            trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
           } else if (ev.type === "error") {
             lines.push(`❌ ${ev.message}`);
+            trace.events.push({ ts: Date.now(), type: "error", message: ev.message });
           }
           if (lines.length > MAX_LINES) lines.splice(1, lines.length - MAX_LINES);
           schedule();
@@ -1282,6 +1340,8 @@ export class TelegramChannel implements Channel {
       const responseText =
         meta.output?.trim() ||
         (meta.error ? `Agent failed: ${meta.error}` : "(no output)");
+      trace.finalText = responseText;
+      trace.finishedAt = Date.now();
       const promptForDisplay = opts.displayPrompt ?? (prompt || "(see attachments)");
       const finalText = [
         `🤖 **${label}** (${provider})`,
@@ -1410,6 +1470,13 @@ export class TelegramChannel implements Channel {
       // Surface the attachment list at the top of the status block.
       status.push(summary);
     }
+    const trace: TraceRecord = {
+      source: "route",
+      prompt: trimmed || "(see attachments)",
+      startedAt: Date.now(),
+      events: [],
+    };
+    this.lastTrace.set(chatId, trace);
     // Suppress the watcher for the duration of this run — anything our run
     // appends to the JSONL will already be shown via the status block.
     const unmute = sessionWatcher.mute(ai.id);
@@ -1418,7 +1485,9 @@ export class TelegramChannel implements Channel {
         prompt: trimmed || "(see attachments)",
         attachments,
         aiSessionId: ai.id,
-        cwd: workspaceDir(),
+        // Honor the AiSession's cwd so the model can reach files in that
+        // tree. Falls back to the global workspaceDir for unscoped sessions.
+        cwd: ai.cwd ?? workspaceDir(),
         yolo: true,
       });
       const live = getLive(handle.meta.runId);
@@ -1428,11 +1497,14 @@ export class TelegramChannel implements Channel {
           if (ev.type === "tool_use") {
             const inputStr = formatToolInput(ev.input);
             status.push(`🔧 ${ev.name}${inputStr ? `: ${inputStr}` : ""}`);
+            trace.events.push({ ts: Date.now(), type: "tool_use", name: ev.name, input: ev.input });
           } else if (ev.type === "tool_result") {
             // Mark previous tool line as complete; light touch.
             status.markLastDone();
+            trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
           } else if (ev.type === "error") {
             status.push(`❌ ${ev.message}`);
+            trace.events.push({ ts: Date.now(), type: "error", message: ev.message });
           }
         }
       })();
@@ -1442,8 +1514,12 @@ export class TelegramChannel implements Channel {
       const finalText =
         meta.output?.trim() ||
         (meta.error ? `Run failed: ${meta.error}` : "(no output)");
+      trace.finalText = finalText;
+      trace.finishedAt = Date.now();
       await status.finalize(finalText);
     } catch (e: any) {
+      trace.finalText = `Error: ${e?.message ?? e}`;
+      trace.finishedAt = Date.now();
       await status.finalize(`Error: ${e?.message ?? e}`);
     } finally {
       stopTyping();
@@ -1561,6 +1637,71 @@ function formatToolInput(input: unknown): string {
   } catch {
     return "";
   }
+}
+
+function renderTraceMarkdown(trace: TraceRecord): string {
+  const lines: string[] = [];
+  const dur = trace.finishedAt
+    ? `${((trace.finishedAt - trace.startedAt) / 1000).toFixed(1)}s`
+    : `${((Date.now() - trace.startedAt) / 1000).toFixed(1)}s (in progress)`;
+  lines.push(`# Trace — ${trace.source}${trace.label ? ` (${trace.label})` : ""}`);
+  lines.push("");
+  lines.push(`- Started: ${new Date(trace.startedAt).toISOString()}`);
+  lines.push(`- Duration: ${dur}`);
+  lines.push(`- Events: ${trace.events.length}`);
+  lines.push("");
+  lines.push("## Prompt");
+  lines.push("");
+  lines.push("```");
+  lines.push(trace.prompt);
+  lines.push("```");
+  lines.push("");
+  lines.push("## Events");
+  lines.push("");
+  for (let i = 0; i < trace.events.length; i++) {
+    const ev = trace.events[i];
+    const t = `+${((ev.ts - trace.startedAt) / 1000).toFixed(1)}s`;
+    if (ev.type === "tool_use") {
+      lines.push(`### ${i + 1}. 🔧 ${ev.name ?? "tool"} (${t})`);
+      lines.push("");
+      lines.push("```json");
+      lines.push(safeStringify(ev.input));
+      lines.push("```");
+    } else if (ev.type === "tool_result") {
+      lines.push(`### ${i + 1}. ✓ ${ev.name ?? "tool result"} (${t})`);
+      lines.push("");
+      lines.push("```");
+      lines.push(stringifyOutput(ev.output));
+      lines.push("```");
+    } else if (ev.type === "error") {
+      lines.push(`### ${i + 1}. ❌ error (${t})`);
+      lines.push("");
+      lines.push("```");
+      lines.push(ev.message ?? "");
+      lines.push("```");
+    }
+    lines.push("");
+  }
+  lines.push("## Response");
+  lines.push("");
+  lines.push(trace.finalText ?? "(in progress)");
+  return lines.join("\n");
+}
+
+function safeStringify(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+function stringifyOutput(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  return safeStringify(v);
 }
 
 function shortStamp(d: Date = new Date()): string {

@@ -41,8 +41,11 @@ function flattenContent(content: unknown): string {
 
 function deriveId(path: string): string {
   const base = basename(path, ".jsonl");
-  const idx = base.lastIndexOf("-");
-  return idx > 0 ? base.slice(idx + 1) : base;
+  // Filenames look like: rollout-<ISO-with-dashes>-<uuid>.jsonl. The UUID
+  // itself contains dashes (8-4-4-4-12), so a simple last-dash split picks
+  // up only the final 12-char chunk and never matches the stored sessionId.
+  const m = base.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+  return m ? m[0] : base;
 }
 
 export const codexProvider: Provider = {

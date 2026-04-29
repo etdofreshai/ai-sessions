@@ -61,9 +61,14 @@ async function fire(job: CronJob): Promise<void> {
     const s = aiStore.read(t.aiSessionId);
     if (!s) throw new Error(`ai-session not found: ${t.aiSessionId}`);
     provider = s.provider;
-    sessionId = s.sessionId;
     aiSessionId = s.id;
     aiSession = s;
+    // Cron-fired runs deliberately do NOT resume the AiSession's existing
+    // provider session: a cron should fire with a clean context every time,
+    // not collide with whatever the user is doing in that session right now.
+    // The AiSession is kept only as the addressing/binding handle — its
+    // bound channel still receives the reply via fanOutToChannels below.
+    sessionId = undefined;
   } else {
     provider = t.provider;
     sessionId = t.sessionId;
@@ -72,7 +77,10 @@ async function fire(job: CronJob): Promise<void> {
   const handle = getProvider(provider).run({
     prompt: t.prompt,
     sessionId,
-    aiSessionId,
+    // Cron runs are ephemeral: don't let attachToMeta overwrite the
+    // AiSession's bound provider sessionId with this cron's fresh one.
+    aiSessionId: aiSession ? undefined : aiSessionId,
+    internal: aiSession ? true : undefined,
     cwd: t.cwd ?? aiSession?.cwd,
     yolo: true,
     effort: aiSession?.reasoningEffort,

@@ -43,6 +43,7 @@ const SLASH_COMMANDS = [
   { command: "agent", description: "Run a one-shot sub-agent: /agent [<provider>] prompt" },
   { command: "btw", description: "Side question with full chat context, doesn't touch the bound session" },
   { command: "usage", description: "Show rate-limit usage across providers (5h / weekly windows)" },
+  { command: "cron", description: "Manage scheduled prompts on this chat: /cron add|ls|rm" },
 ];
 
 interface PendingBinding {
@@ -928,6 +929,107 @@ export class TelegramChannel implements Channel {
       const snaps = await Promise.all(targets.map((p) => getUsage(p)));
       const text = snaps.map((s) => formatUsage(s)).join("\n");
       await api.sendMessage({ chat_id: chatId, text });
+      return true;
+    }
+
+    if (cmd === "/cron") {
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (!ai) {
+        await api.sendMessage({ chat_id: chatId, text: "Not bound. /bind a session first." });
+        return true;
+      }
+      const cronStore = await import("../crons/store.js");
+      const { makeJob, nextFireAfter } = await import("../crons/scheduler.js");
+
+      const sub = (arg.split(/\s+/)[0] ?? "ls").toLowerCase();
+      const rest = arg.slice(sub.length).trim();
+
+      if (sub === "ls" || sub === "list" || sub === "") {
+        const mine = cronStore.list().filter(
+          (j) => j.target.kind === "ai_session" && j.target.aiSessionId === ai.id,
+        );
+        if (mine.length === 0) {
+          await api.sendMessage({ chat_id: chatId, text: "No crons on this session." });
+          return true;
+        }
+        const lines = mine.map(
+          (j) =>
+            `${j.enabled ? "on " : "off"}  ${j.name}  ${j.cron}  next=${j.nextRunAt}`,
+        );
+        await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
+        return true;
+      }
+
+      if (sub === "rm" || sub === "remove" || sub === "delete") {
+        const name = rest.trim();
+        if (!name) {
+          await api.sendMessage({ chat_id: chatId, text: "Usage: /cron rm <name>" });
+          return true;
+        }
+        const j = cronStore.read(name);
+        if (
+          !j ||
+          j.target.kind !== "ai_session" ||
+          j.target.aiSessionId !== ai.id
+        ) {
+          await api.sendMessage({ chat_id: chatId, text: `No cron \"${name}\" on this session.` });
+          return true;
+        }
+        cronStore.remove(name);
+        await api.sendMessage({ chat_id: chatId, text: `removed: ${name}` });
+        return true;
+      }
+
+      if (sub === "add") {
+        // Cron expressions are 5 whitespace-separated fields; everything after
+        // the 5th token is the prompt body.
+        const m = /^(\S+)\s+(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+([\s\S]+)$/.exec(rest);
+        if (!m) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'Usage: /cron add <name> "<m h dom mon dow>" <prompt>\n' +
+              'Example: /cron add standup "0 9 * * 1-5" Summarize yesterday and list 3 priorities for today',
+          });
+          return true;
+        }
+        const [, name, cron, prompt] = m;
+        // Strip surrounding quotes from the cron expr if the user added them.
+        const cronExpr = cron.replace(/^"|"$/g, "");
+        try {
+          // Validate by computing the next fire — throws on bad expressions.
+          nextFireAfter(cronExpr, new Date(), "America/Chicago");
+        } catch (e: any) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: `Bad cron expression: ${e?.message ?? e}`,
+          });
+          return true;
+        }
+        if (cronStore.read(name)) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: `cron \"${name}\" already exists; /cron rm ${name} first`,
+          });
+          return true;
+        }
+        const job = makeJob({
+          name,
+          cron: cronExpr,
+          timezone: "America/Chicago",
+          target: { kind: "ai_session", aiSessionId: ai.id, prompt: prompt.trim() },
+        });
+        cronStore.write(job);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `added: ${job.name}\nnext=${job.nextRunAt}`,
+        });
+        return true;
+      }
+
+      await api.sendMessage({
+        chat_id: chatId,
+        text: "Subcommands: /cron add <name> \"<expr>\" <prompt> | /cron ls | /cron rm <name>",
+      });
       return true;
     }
 

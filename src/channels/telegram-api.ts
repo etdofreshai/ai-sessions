@@ -164,6 +164,33 @@ export class TelegramApi {
     return this.call("setMyCommands", opts);
   }
 
+  async sendPhoto(opts: {
+    chat_id: number;
+    photo: { bytes: Buffer; filename: string; mimeType?: string };
+    caption?: string;
+    message_thread_id?: number;
+  }): Promise<TgMessage> {
+    const fd = new FormData();
+    fd.set("chat_id", String(opts.chat_id));
+    if (opts.caption) fd.set("caption", opts.caption);
+    if (opts.message_thread_id != null) {
+      fd.set("message_thread_id", String(opts.message_thread_id));
+    }
+    const blob = new Blob([new Uint8Array(opts.photo.bytes)], {
+      type: opts.photo.mimeType ?? "image/png",
+    });
+    fd.set("photo", blob, opts.photo.filename);
+    const res = await fetch(`${API_BASE}/bot${this.token}/sendPhoto`, {
+      method: "POST",
+      body: fd,
+    });
+    const json: any = await res.json();
+    if (!json.ok) {
+      throw new Error(`telegram sendPhoto failed: ${json.description ?? JSON.stringify(json)}`);
+    }
+    return json.result as TgMessage;
+  }
+
   async sendDocument(opts: {
     chat_id: number;
     file: { bytes: Buffer; filename: string; mimeType?: string };

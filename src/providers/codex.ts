@@ -204,6 +204,16 @@ export const codexProvider: Provider = {
                   });
                 } else if (item.type === "error") {
                   emit({ type: "error", message: item.message ?? "codex error" });
+                } else {
+                  // Surface unrecognized item types as tool_use traces so we
+                  // can see what codex emits for things like generated images
+                  // without losing the data. The full payload is the input.
+                  console.error(`[codex] unhandled item/completed type=${item.type} keys=${Object.keys(item).join(",")}`);
+                  emit({
+                    type: "tool_use",
+                    name: `codex:${item.type}`,
+                    input: item,
+                  });
                 }
               })
             );

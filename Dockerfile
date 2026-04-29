@@ -38,6 +38,12 @@ RUN chown node:node /app
 
 USER node
 
+# Default git identity for any commits the agent makes from inside the
+# container (e.g. workspace auto-sync). Override at runtime by mounting a
+# host ~/.gitconfig or by `git config --global` inside an interactive shell.
+RUN git config --global user.name "ETdoFresh" \
+    && git config --global user.email "etdofresh@gmail.com"
+
 # Install project deps first (cache-friendly).
 COPY --chown=node:node package.json package-lock.json* ./
 RUN npm ci

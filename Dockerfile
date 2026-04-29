@@ -16,7 +16,7 @@ FROM node:22-slim
 # agent-sdk's bundled platform-specific binary is fragile in cross-libc
 # Docker builds).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates curl \
+    && apt-get install -y --no-install-recommends git ca-certificates curl jq \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g \
         @openai/codex \

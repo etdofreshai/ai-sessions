@@ -1604,6 +1604,27 @@ export class TelegramChannel implements Channel {
             // Mark previous tool line as complete; light touch.
             status.markLastDone();
             trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
+          } else if (ev.type === "image") {
+            try {
+              const { readFileSync } = await import("node:fs");
+              const { basename } = await import("node:path");
+              let bytes: Buffer | null = null;
+              let filename = "image.png";
+              if (ev.path) {
+                bytes = readFileSync(ev.path);
+                filename = basename(ev.path);
+              } else if (ev.bytes) {
+                bytes = Buffer.from(ev.bytes, "base64");
+              }
+              if (bytes && this.api) {
+                await this.api.sendPhoto({
+                  chat_id: chatId,
+                  photo: { bytes, filename, mimeType: ev.mimeType ?? "image/png" },
+                });
+              }
+            } catch (e) {
+              console.error("[telegram] sendPhoto failed:", e);
+            }
           } else if (ev.type === "error") {
             console.error("[telegram] route run error event:", ev.message);
             status.push(`❌ ${ev.message}`);

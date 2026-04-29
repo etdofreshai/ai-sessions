@@ -169,6 +169,7 @@ export const codexProvider: Provider = {
           // State across notifications for this turn.
           let turnId: string | null = null;
           let textOut = "";
+          const imageIds = new Set<string>();
           const turnDone = new Promise<{ status: string; error?: string }>((resolve) => {
             const unsubs: Array<() => void> = [];
             const cleanup = () => unsubs.forEach((fn) => fn());
@@ -204,10 +205,30 @@ export const codexProvider: Provider = {
                   });
                 } else if (item.type === "error") {
                   emit({ type: "error", message: item.message ?? "codex error" });
+                } else if (item.type === "imageGeneration") {
+                  // Codex emits one item per generated image with a savedPath
+                  // on disk (and a base64 `result` we don't need when the file
+                  // exists). Surface it as both a tool_use (so traces stay
+                  // complete) and a dedicated image event the channel can
+                  // render inline.
+                  if (item.id && imageIds.has(item.id)) {
+                    /* already emitted */
+                  } else if (item.savedPath || item.result) {
+                    if (item.id) imageIds.add(item.id);
+                    emit({
+                      type: "image",
+                      ...(item.savedPath ? { path: item.savedPath } : {}),
+                      ...(item.result && !item.savedPath ? { bytes: item.result } : {}),
+                      mimeType: "image/png",
+                      ...(item.revisedPrompt ? { caption: String(item.revisedPrompt).slice(0, 1000) } : {}),
+                    });
+                  }
+                  emit({
+                    type: "tool_use",
+                    name: `codex:${item.type}`,
+                    input: { id: item.id, status: item.status, savedPath: item.savedPath },
+                  });
                 } else {
-                  // Surface unrecognized item types as tool_use traces so we
-                  // can see what codex emits for things like generated images
-                  // without losing the data. The full payload is the input.
                   console.error(`[codex] unhandled item/completed type=${item.type} keys=${Object.keys(item).join(",")}`);
                   emit({
                     type: "tool_use",

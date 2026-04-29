@@ -10,6 +10,7 @@ export type RunEvent =
   | { type: "text"; text: string }
   | { type: "tool_use"; name: string; input?: unknown }
   | { type: "tool_result"; name?: string; output?: unknown }
+  | { type: "image"; path?: string; bytes?: string; mimeType?: string; caption?: string }
   | { type: "error"; message: string }
   | { type: "end"; sessionId?: string; output: string };
 

@@ -18,6 +18,7 @@ import {
 import { openapi } from "./openapi.js";
 import * as cronStore from "../crons/store.js";
 import { makeJob, nextFireAfter } from "../crons/scheduler.js";
+import { getUsage } from "../usage/index.js";
 
 export function createApp() {
   const app = express();
@@ -236,6 +237,26 @@ export function createApp() {
     const ok = cronStore.remove(req.params.name);
     if (!ok) return res.status(404).json({ error: "cron not found" });
     res.json({ ok: true });
+  });
+
+  app.get("/usage", async (req, res, next) => {
+    try {
+      const force = String(req.query.force ?? "") === "1";
+      const targets = ["claude", "glm", "codex"];
+      const snaps = await Promise.all(targets.map((p) => getUsage(p, { force })));
+      res.json(snaps);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/usage/:provider", async (req, res, next) => {
+    try {
+      const force = String(req.query.force ?? "") === "1";
+      res.json(await getUsage(req.params.provider, { force }));
+    } catch (e) {
+      next(e);
+    }
   });
 
   app.use((err: any, _req: Request, res: Response, _next: express.NextFunction) => {

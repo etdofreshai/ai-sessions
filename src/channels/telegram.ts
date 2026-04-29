@@ -42,6 +42,7 @@ const SLASH_COMMANDS = [
   { command: "export", description: "Export the bound session's transcript as Markdown" },
   { command: "agent", description: "Run a one-shot sub-agent: /agent [<provider>] prompt" },
   { command: "btw", description: "Side question with full chat context, doesn't touch the bound session" },
+  { command: "usage", description: "Show rate-limit usage across providers (5h / weekly windows)" },
 ];
 
 interface PendingBinding {
@@ -918,6 +919,15 @@ export class TelegramChannel implements Channel {
           caption: `Trace: ${trace.events.length} events${trace.finalText ? `, response ${trace.finalText.length} chars` : " (in progress)"}`,
         });
       }
+      return true;
+    }
+
+    if (cmd === "/usage") {
+      const { getUsage, formatUsage } = await import("../usage/index.js");
+      const targets = arg ? arg.split(/\s+/).filter(Boolean) : ["claude", "glm", "codex"];
+      const snaps = await Promise.all(targets.map((p) => getUsage(p)));
+      const text = snaps.map((s) => formatUsage(s)).join("\n");
+      await api.sendMessage({ chat_id: chatId, text });
       return true;
     }
 

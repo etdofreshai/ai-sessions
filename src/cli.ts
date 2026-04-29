@@ -9,6 +9,7 @@ import { channels as channelRegistry, listChannelNames } from "./channels/index.
 import * as cronStore from "./crons/store.js";
 import { makeJob, nextFireAfter } from "./crons/scheduler.js";
 import type { CronJob } from "./crons/types.js";
+import { getUsage, formatUsage } from "./usage/index.js";
 
 const program = new Command();
 program
@@ -383,6 +384,21 @@ crons
     }
     cronStore.write(j);
     console.log(j.enabled ? "enabled" : "disabled");
+  });
+
+program
+  .command("usage [provider]")
+  .description("Show rate-limit usage for a provider (or all if omitted)")
+  .option("--force", "skip cache and probe live")
+  .option("--json", "output JSON")
+  .action(async (provider: string | undefined, opts: { force?: boolean; json?: boolean }) => {
+    const targets = provider ? [provider] : ["claude", "glm", "codex"];
+    const snaps = await Promise.all(targets.map((p) => getUsage(p, { force: opts.force })));
+    if (opts.json) {
+      console.log(JSON.stringify(snaps, null, 2));
+      return;
+    }
+    for (const s of snaps) console.log(formatUsage(s));
   });
 
 program

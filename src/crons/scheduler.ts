@@ -2,8 +2,11 @@ import { spawn } from "node:child_process";
 import { CronExpressionParser } from "cron-parser";
 import { getProvider } from "../providers/index.js";
 import * as aiStore from "../ai-sessions/store.js";
+import { channels as channelRegistry } from "../channels/index.js";
 import * as store from "./store.js";
 import type { CronJob } from "./types.js";
+import type { AiSession } from "../ai-sessions/types.js";
+import type { RunMetadata } from "../runs/types.js";
 
 const TICK_MS = 30_000;
 
@@ -52,6 +55,7 @@ async function fire(job: CronJob): Promise<void> {
   let provider: string;
   let sessionId: string | undefined;
   let aiSessionId: string | undefined;
+  let aiSession: AiSession | null = null;
 
   if (t.kind === "ai_session") {
     const s = aiStore.read(t.aiSessionId);
@@ -59,6 +63,7 @@ async function fire(job: CronJob): Promise<void> {
     provider = s.provider;
     sessionId = s.sessionId;
     aiSessionId = s.id;
+    aiSession = s;
   } else {
     provider = t.provider;
     sessionId = t.sessionId;
@@ -68,14 +73,45 @@ async function fire(job: CronJob): Promise<void> {
     prompt: t.prompt,
     sessionId,
     aiSessionId,
-    cwd: t.cwd,
+    cwd: t.cwd ?? aiSession?.cwd,
     yolo: true,
+    effort: aiSession?.reasoningEffort,
   });
-  // Drain events so the run actually executes; we don't surface output.
+  // Drain events so the run actually executes. We don't relay tool/image
+  // events from a cron-fired run yet — just the final text to bound channels.
   for await (const _ of handle.events) {
     /* discard */
   }
-  await handle.done;
+  const meta = await handle.done;
+
+  // Fan out the run's final text to any channels bound to this AiSession.
+  // User-initiated runs (e.g. Telegram /msg) already publish their own
+  // status; cron-initiated runs need this hook explicitly.
+  if (aiSession) await fanOutToChannels(aiSession, meta, job);
+}
+
+async function fanOutToChannels(
+  ai: AiSession,
+  meta: RunMetadata,
+  job: CronJob,
+): Promise<void> {
+  const chatId = ai.channels?.telegram?.chatId;
+  if (!chatId) return;
+  const channel = channelRegistry.telegram;
+  if (!channel) return;
+  const text = (meta.output ?? "").trim();
+  const body = text || (meta.error ? `Run failed: ${meta.error}` : "(no output)");
+  // Cron-fired runs aren't tied to a user message, so prefix with the job
+  // name — otherwise the bubble feels like it appeared out of nowhere.
+  const out = `⏰ \`${job.name}\`\n\n${body}`;
+  try {
+    await channel.send(
+      { chatId, threadId: ai.channels?.telegram?.threadId },
+      { text: out },
+    );
+  } catch (e: any) {
+    console.error(`[crons] fanOut to telegram chat ${chatId} failed: ${e?.message ?? e}`);
+  }
 }
 
 // Returns true if this process won the race to fire the job.

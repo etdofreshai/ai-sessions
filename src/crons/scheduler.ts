@@ -117,6 +117,7 @@ async function fanOutToChannels(
       { chatId, threadId: ai.channels?.telegram?.threadId },
       { text: out },
     );
+    console.error(`[crons] fanOut ok name=${job.name} chat=${chatId} bytes=${out.length}`);
   } catch (e: any) {
     console.error(`[crons] fanOut to telegram chat ${chatId} failed: ${e?.message ?? e}`);
   }

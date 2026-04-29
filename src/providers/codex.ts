@@ -276,7 +276,7 @@ export const codexProvider: Provider = {
               : "");
           if (textBody) inputItems.push({ type: "text", text: textBody });
           for (const a of opts.attachments ?? []) {
-            if (a.kind === "image") inputItems.push({ type: "local_image", path: a.path });
+            if (a.kind === "image") inputItems.push({ type: "localImage", path: a.path });
           }
           // Capture turnId from the response too (for steer/interrupt).
           const turnStartResultPromise = client

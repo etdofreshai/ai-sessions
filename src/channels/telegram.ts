@@ -1593,6 +1593,7 @@ export class TelegramChannel implements Channel {
         effort: ai.reasoningEffort ?? defaultReasoningEffort(),
       });
       const live = getLive(handle.meta.runId);
+      const sentImagePaths = new Set<string>();
       const watcher = (async () => {
         if (!live) return;
         for await (const ev of live.events) {
@@ -1621,6 +1622,7 @@ export class TelegramChannel implements Channel {
                   chat_id: chatId,
                   photo: { bytes, filename, mimeType: ev.mimeType ?? "image/png" },
                 });
+                if (ev.path) sentImagePaths.add(ev.path);
               }
             } catch (e) {
               console.error("[telegram] sendPhoto failed:", e);
@@ -1641,6 +1643,49 @@ export class TelegramChannel implements Channel {
         (meta.error ? `Run failed: ${meta.error}` : "(no output)");
       trace.finalText = finalText;
       trace.finishedAt = Date.now();
+      // Heuristic: when the agent returns a local image path (e.g. from a
+      // sub-skill that hits a different ai-sessions run we never saw), scan
+      // the final text + captured tool outputs and auto-send any image files
+      // we haven't already pushed via an image event.
+      try {
+        const haystacks: string[] = [finalText];
+        for (const e of trace.events) {
+          if (e.type === "tool_result") haystacks.push(stringifyOutput(e.output));
+        }
+        const re = /(?:[A-Za-z]:[\\/]|[\\/])[^\s"'`<>|*?]*?\.(?:png|jpe?g|gif|webp)\b/gi;
+        const seen = new Set<string>();
+        const { existsSync, statSync, readFileSync } = await import("node:fs");
+        const { basename } = await import("node:path");
+        for (const h of haystacks) {
+          for (const m of h.matchAll(re)) {
+            const p = m[0];
+            if (seen.has(p) || sentImagePaths.has(p)) continue;
+            seen.add(p);
+            if (!existsSync(p)) continue;
+            const st = statSync(p);
+            // Skip absurdly large files; Telegram caps photos at 10MB.
+            if (!st.isFile() || st.size > 9 * 1024 * 1024) continue;
+            const bytes = readFileSync(p);
+            const ext = p.split(".").pop()?.toLowerCase();
+            const mimeType =
+              ext === "png" ? "image/png" :
+              ext === "gif" ? "image/gif" :
+              ext === "webp" ? "image/webp" : "image/jpeg";
+            try {
+              if (this.api) {
+                await this.api.sendPhoto({
+                  chat_id: chatId,
+                  photo: { bytes, filename: basename(p), mimeType },
+                });
+              }
+            } catch (e) {
+              console.error("[telegram] auto-sendPhoto failed:", e);
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[telegram] image-path scan failed:", e);
+      }
       await status.finalize(finalText);
     } catch (e: any) {
       console.error("[telegram] routeToSession error:", e?.stack ?? e?.message ?? e);

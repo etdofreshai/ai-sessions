@@ -554,13 +554,19 @@ export class TelegramChannel implements Channel {
         delete current.channels.telegram;
         aiStore.write(current);
       }
-      const ai = aiStore.create({ provider });
+      // Inherit the previous binding's cwd so /new in a chat that was already
+      // working under a specific directory keeps operating there. Caller can
+      // still /cwd to repoint after.
+      const ai = aiStore.create({ provider, cwd: current?.cwd });
       ai.channels = { ...(ai.channels ?? {}), telegram: { chatId } };
       aiStore.write(ai);
       this.pending.delete(chatId);
       await api.sendMessage({
         chat_id: chatId,
-        text: `New Session ${ai.id.slice(0, 8)} (${provider}). Send a message to start.`,
+        text:
+          `New Session ${ai.id.slice(0, 8)} (${provider})` +
+          (ai.cwd ? `\ncwd: ${ai.cwd}` : "") +
+          `\nSend a message to start.`,
       });
       return true;
     }

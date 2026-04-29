@@ -477,15 +477,26 @@ export class TelegramChannel implements Channel {
     }
 
     if (cmd === "/status") {
+      const chatType = m?.chat?.type ?? "?";
+      const chatTitle = m?.chat?.title ?? m?.chat?.username ?? "";
+      const threadId = m?.message_thread_id;
+      const messageId = m?.message_id;
       const ai = aiStore.findByTelegramChat(chatId);
+      const header = [
+        `Chat: ${chatId}${chatTitle ? ` (${chatTitle})` : ""} [${chatType}]`,
+        threadId != null ? `Thread: ${threadId}` : null,
+        messageId != null ? `Message: ${messageId}` : null,
+      ].filter(Boolean) as string[];
       if (!ai) {
         await api.sendMessage({
           chat_id: chatId,
-          text: "Not bound. Send /bind to pick a Session.",
+          text: [...header, "", "Not bound. Send /bind to pick a Session."].join("\n"),
         });
         return true;
       }
       const lines = [
+        ...header,
+        "",
         `Session: ${ai.id}`,
         `Name: ${ai.name ?? "(unnamed)"}`,
         `Provider: ${ai.provider}`,

@@ -3,78 +3,95 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { UsageSnapshot, UsageWindow } from "./types.js";
 
-// Codex (chatgpt auth mode) routes through ChatGPT's backend, not the public
-// OpenAI API — `x-ratelimit-*` headers from api.openai.com don't apply, and
-// there's no documented usage endpoint. Best-effort: if the user is on a raw
-// OPENAI_API_KEY, hit the public API; otherwise return an unsupported note.
-export async function probeCodex(): Promise<UsageSnapshot> {
-  const authPath = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
-  let mode = "unknown";
-  let openaiKey: string | null = null;
-  if (existsSync(authPath)) {
-    try {
-      const j = JSON.parse(readFileSync(authPath, "utf8"));
-      mode = j?.auth_mode ?? "unknown";
-      openaiKey = j?.OPENAI_API_KEY ?? null;
-    } catch {
-      /* ignore */
+// The Codex CLI itself polls /backend-api/wham/usage every 60s using the
+// chatgpt-account-id + Bearer access_token from ~/.codex/auth.json. The
+// response contains primary (5h) and secondary (7d) rate-limit windows with
+// percent used + reset timestamps — exactly what we want to surface.
+const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+
+interface CodexAuth {
+  accessToken: string;
+  accountId: string;
+}
+
+function readCodexAuth(): CodexAuth | null {
+  const p = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
+  if (!existsSync(p)) return null;
+  try {
+    const j = JSON.parse(readFileSync(p, "utf8"));
+    const accessToken: string | undefined = j?.tokens?.access_token;
+    if (!accessToken) return null;
+    // Prefer the account_id from auth.json; otherwise pull chatgpt_user_id
+    // from the id_token claims (codex-cli does the same).
+    let accountId: string | undefined = j?.tokens?.account_id;
+    if (!accountId && typeof j?.tokens?.id_token === "string") {
+      try {
+        const payload = j.tokens.id_token.split(".")[1];
+        const decoded = JSON.parse(Buffer.from(payload, "base64").toString("utf8"));
+        accountId = decoded?.["https://api.openai.com/auth"]?.chatgpt_user_id;
+      } catch {
+        /* ignore */
+      }
     }
+    if (!accountId) return null;
+    return { accessToken, accountId };
+  } catch {
+    return null;
   }
+}
 
+function windowFromCodex(label: string, w: any): UsageWindow | null {
+  if (!w) return null;
+  const out: UsageWindow = { label };
+  if (typeof w.used_percent === "number") out.usedPct = w.used_percent;
+  if (typeof w.reset_at === "number") out.resetAt = new Date(w.reset_at * 1000).toISOString();
+  else if (typeof w.reset_after_seconds === "number")
+    out.resetAt = new Date(Date.now() + w.reset_after_seconds * 1000).toISOString();
+  return out;
+}
+
+export async function probeCodex(): Promise<UsageSnapshot> {
   const observedAt = new Date().toISOString();
-
-  if (mode === "chatgpt" && !openaiKey) {
+  const auth = readCodexAuth();
+  if (!auth) {
     return {
       provider: "codex",
       windows: [],
-      notes: [
-        "codex is using ChatGPT auth (Plus/Pro/Team) — usage windows are not exposed via API",
-        "5h and weekly limits are tracked server-side; visible only inside the codex CLI itself",
-      ],
-      observedAt,
-    };
-  }
-
-  if (!openaiKey) {
-    return {
-      provider: "codex",
-      windows: [],
-      notes: ["no OPENAI_API_KEY found in ~/.codex/auth.json"],
       observedAt,
       error: "no_credentials",
+      notes: ["~/.codex/auth.json missing tokens.access_token or account id"],
     };
   }
 
-  // Public OpenAI API path: a tiny chat.completions probe surfaces standard
-  // x-ratelimit-* headers we can convert into a single rolling window.
   try {
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
+    const resp = await fetch(USAGE_URL, {
       headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${openaiKey}`,
+        accept: "application/json",
+        authorization: `Bearer ${auth.accessToken}`,
+        "chatgpt-account-id": auth.accountId,
+        // Cloudflare in front of chatgpt.com 403s generic clients; mimic the
+        // CLI's user-agent string.
+        "user-agent": "codex_cli_rs/0.50.0",
       },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        max_tokens: 1,
-        messages: [{ role: "user", content: "hi" }],
-      }),
     });
-    const limit = Number(resp.headers.get("x-ratelimit-limit-requests"));
-    const remaining = Number(resp.headers.get("x-ratelimit-remaining-requests"));
-    const reset = resp.headers.get("x-ratelimit-reset-requests");
-    const windows: UsageWindow[] = [];
-    if (Number.isFinite(limit) && Number.isFinite(remaining) && limit > 0) {
-      windows.push({
-        label: "rpm",
-        usedPct: ((limit - remaining) / limit) * 100,
-        resetAt: reset ?? undefined,
-      });
+    if (!resp.ok) {
+      return {
+        provider: "codex",
+        windows: [],
+        observedAt,
+        error: `http_${resp.status}`,
+      };
     }
+    const j: any = await resp.json();
+    const rl = j?.rate_limit ?? {};
+    const windows: UsageWindow[] = [];
+    const primary = windowFromCodex("5h", rl.primary_window);
+    const secondary = windowFromCodex("7d", rl.secondary_window);
+    if (primary) windows.push(primary);
+    if (secondary) windows.push(secondary);
     return {
       provider: "codex",
       windows,
-      notes: windows.length ? undefined : ["no x-ratelimit-* headers returned"],
       observedAt,
     };
   } catch (e) {

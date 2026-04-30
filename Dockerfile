@@ -15,12 +15,38 @@ FROM node:22-slim
 # official native installer instead of @anthropic-ai/claude-code, since the
 # agent-sdk's bundled platform-specific binary is fragile in cross-libc
 # Docker builds).
+#
+# Also install a baseline dev toolchain so agents running inside the
+# container can build and run native code without needing to apt-install
+# packages mid-task: gcc/g++/make from build-essential, Python 3, and a
+# handful of headers commonly required by `pip install` / `cargo build`
+# (openssl + pkg-config). Rust is installed in a separate layer below.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates curl jq \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        jq \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        python3 \
+        python3-pip \
+        python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g \
         @openai/codex \
         opencode-ai
+
+# Rust toolchain via rustup (distro rustc is too old for most modern crates).
+# Installs to /usr/local so all users see it; default toolchain is stable.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal \
+    && chmod -R a+rwX /usr/local/rustup /usr/local/cargo \
+    && rustc --version && cargo --version
 
 # Install Claude Code's native binary system-wide. The official install.sh
 # would land it under $HOME/.local/bin/claude, but deployments often mount

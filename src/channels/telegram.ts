@@ -32,7 +32,7 @@ const SLASH_COMMANDS = [
   { command: "fork", description: "Fork the bound session to another provider: /fork <provider>" },
   { command: "remote", description: "Toggle claude remote-control: /remote [true|false]" },
   { command: "effort", description: "Set reasoning effort: /effort [low|medium|high|xhigh]" },
-  { command: "watch", description: "Mirror new session entries to chat: /watch [<duration>|on|off] (default 60m sliding)" },
+  { command: "watch", description: "Mirror new session entries to chat: /watch [<duration>|on|off|status]" },
   { command: "unwatch", description: "Alias for /watch off" },
   { command: "cwd", description: "Show or set the bound session's cwd" },
   { command: "rename", description: "Rename the bound session (no arg = auto-summarize)" },
@@ -659,6 +659,12 @@ export class TelegramChannel implements Channel {
         "../ai-sessions/watch.js"
       );
       const token = arg.trim().toLowerCase();
+
+      if (token === "status" || token === "info" || token === "?") {
+        const text = await this.formatWatchStatus(ai);
+        await api.sendMessage({ chat_id: chatId, text });
+        return true;
+      }
 
       if (token === "off") {
         sessionWatcher.stop(ai.id);
@@ -1749,6 +1755,77 @@ export class TelegramChannel implements Channel {
 
   // Builds the forwarder used by session-watcher: pretty-prints role+text
   // and pushes it to the bound chat. Long messages are chunked by send().
+  private async formatWatchStatus(ai: AiSession): Promise<string> {
+    const { formatTtl } = await import("../ai-sessions/watch.js");
+    const lines: string[] = [];
+
+    // Mode + expiry from the persisted AiSession.
+    let mode = "off";
+    if (ai.watch === true) {
+      mode = ai.watchTtlMs ? `sliding ${formatTtl(ai.watchTtlMs)}` : "indefinite";
+    }
+    lines.push(`Mode:     ${mode}`);
+
+    if (ai.watchUntil) {
+      const until = new Date(ai.watchUntil);
+      const ms = until.getTime() - Date.now();
+      const rel =
+        ms > 0
+          ? `in ${formatTtl(ms)}`
+          : `expired ${formatTtl(-ms)} ago`;
+      lines.push(`Expires:  ${rel} (${ai.watchUntil})`);
+    } else if (ai.watch === true) {
+      lines.push(`Expires:  n/a (no TTL)`);
+    }
+
+    // Live watcher state.
+    const status = sessionWatcher.getStatus(ai.id);
+    if (!status) {
+      lines.push("Running:  no (no in-process watcher)");
+      return lines.join("\n");
+    }
+    lines.push(`Running:  yes${status.muted ? " (muted)" : ""}`);
+    lines.push(
+      `Lag:      ${
+        status.caughtUp ? "0 bytes (caught up)" : `${status.lagBytes} bytes behind`
+      }`,
+    );
+
+    const preview = (s: string): string => {
+      const oneLine = s.replace(/\s+/g, " ").trim();
+      return oneLine.length > 120 ? oneLine.slice(0, 117) + "…" : oneLine;
+    };
+
+    lines.push("");
+    lines.push("Last forwarded to Telegram:");
+    if (status.lastForwardedAt) {
+      const role = status.lastForwardedRole === "user" ? "👤" : "🤖";
+      lines.push(`  ${role}  ${new Date(status.lastForwardedAt).toISOString()}`);
+      lines.push(`      "${preview(status.lastForwardedPreview)}"`);
+    } else {
+      lines.push("  (nothing forwarded yet this watcher)");
+    }
+
+    lines.push("");
+    lines.push("Last entry on disk:");
+    const tail = sessionWatcher.readLatestEntry(status.path);
+    if (tail) {
+      const role = tail.role === "user" ? "👤" : "🤖";
+      lines.push(`  ${role}  ${tail.timestamp ?? "(no timestamp)"}`);
+      lines.push(`      "${preview(tail.preview)}"`);
+    } else {
+      lines.push("  (no parseable user/assistant entry)");
+    }
+
+    lines.push("");
+    const upToDate =
+      status.caughtUp &&
+      tail !== null &&
+      status.lastForwardedPreview === tail.preview;
+    lines.push(`Up to date: ${upToDate}`);
+    return lines.join("\n");
+  }
+
   private makeForwardFn(chatId: number): sessionWatcher.ForwardFn {
     return (role, text) => {
       const prefix = role === "user" ? "👤" : "🤖";

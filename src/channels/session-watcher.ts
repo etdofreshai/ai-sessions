@@ -22,6 +22,11 @@ interface Entry {
   pending: NodeJS.Timeout | null;
   forward: ForwardFn;
   partial: string;
+  // Last entry actually pushed to the channel — used by /watch status to
+  // show what the user has seen versus what's on disk now.
+  lastForwardedAt: number | null;
+  lastForwardedRole: "user" | "assistant" | null;
+  lastForwardedPreview: string;
 }
 
 const entries = new Map<string, Entry>();
@@ -67,6 +72,9 @@ export async function start(
     pending: null,
     forward,
     partial: "",
+    lastForwardedAt: null,
+    lastForwardedRole: null,
+    lastForwardedPreview: "",
   };
 
   const onChange = () => {
@@ -125,6 +133,9 @@ async function readNew(e: Entry): Promise<void> {
       const flat = flattenContent(parsed?.message?.content);
       if (!flat) continue;
       e.forward(role, flat);
+      e.lastForwardedAt = Date.now();
+      e.lastForwardedRole = role;
+      e.lastForwardedPreview = flat;
     }
   } finally {
     e.reading = false;
@@ -161,6 +172,95 @@ export function stop(aiId: string): boolean {
 
 export function isWatching(aiId: string): boolean {
   return entries.has(aiId);
+}
+
+// Snapshot of an active watcher's state for /watch status. Returns null when
+// no watcher is running for this AiSession.
+export interface WatchStatus {
+  path: string;
+  fileSize: number;
+  offset: number;
+  lagBytes: number;
+  caughtUp: boolean;
+  muted: boolean;
+  lastForwardedAt: number | null;
+  lastForwardedRole: "user" | "assistant" | null;
+  lastForwardedPreview: string;
+}
+
+export function getStatus(aiId: string): WatchStatus | null {
+  const e = entries.get(aiId);
+  if (!e) return null;
+  let fileSize = 0;
+  try {
+    fileSize = statSync(e.path).size;
+  } catch {
+    /* ignore */
+  }
+  return {
+    path: e.path,
+    fileSize,
+    offset: e.offset,
+    lagBytes: Math.max(0, fileSize - e.offset),
+    caughtUp: e.offset >= fileSize,
+    muted: e.muted,
+    lastForwardedAt: e.lastForwardedAt,
+    lastForwardedRole: e.lastForwardedRole,
+    lastForwardedPreview: e.lastForwardedPreview,
+  };
+}
+
+// Re-parse the tail of the session jsonl to find the most recent forwardable
+// (user/assistant with non-empty visible text) entry. Cheap: reads the last
+// ~64KB rather than the whole file. Returns null when no such entry exists.
+export interface DiskTailEntry {
+  role: "user" | "assistant";
+  preview: string;
+  timestamp: string | null;
+}
+
+export function readLatestEntry(path: string): DiskTailEntry | null {
+  let size = 0;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return null;
+  }
+  if (size === 0) return null;
+  const tailLen = Math.min(size, 64 * 1024);
+  const fd = openSync(path, "r");
+  let buf: Buffer;
+  try {
+    buf = Buffer.alloc(tailLen);
+    readSync(fd, buf, 0, tailLen, size - tailLen);
+  } finally {
+    closeSync(fd);
+  }
+  // Drop the leading partial line so JSON.parse doesn't choke on it.
+  const text = buf.toString("utf8");
+  const firstNewline = text.indexOf("\n");
+  const usable = firstNewline >= 0 && tailLen < size ? text.slice(firstNewline + 1) : text;
+  const lines = usable.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const role = parsed?.message?.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const flat = flattenContent(parsed?.message?.content);
+    if (!flat) continue;
+    return {
+      role,
+      preview: flat,
+      timestamp: typeof parsed?.timestamp === "string" ? parsed.timestamp : null,
+    };
+  }
+  return null;
 }
 
 // Suppress forwarding for the duration of an in-app run on this session.

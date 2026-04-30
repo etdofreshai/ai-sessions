@@ -44,6 +44,7 @@ const SLASH_COMMANDS = [
   { command: "btw", description: "Side question with full chat context, doesn't touch the bound session" },
   { command: "usage", description: "Show rate-limit usage across providers (5h / weekly windows)" },
   { command: "cron", description: "Manage scheduled prompts on this chat: /cron add|ls|rm" },
+  { command: "sha", description: "Show the running server's git commit (so you can tell if it's the latest)" },
 ];
 
 interface PendingBinding {
@@ -985,6 +986,17 @@ export class TelegramChannel implements Channel {
           caption: `Trace: ${trace.events.length} events${trace.finalText ? `, response ${trace.finalText.length} chars` : " (in progress)"}`,
         });
       }
+      return true;
+    }
+
+    if (cmd === "/sha") {
+      const { GIT, VERSION } = await import("../version.js");
+      const text = [
+        `Version: ${VERSION}`,
+        `Branch:  ${GIT.branch}`,
+        `Commit:  ${GIT.shortSha} (${GIT.sha})`,
+      ].join("\n");
+      await api.sendMessage({ chat_id: chatId, text });
       return true;
     }
 

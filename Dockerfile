@@ -70,6 +70,14 @@ RUN set -eux \
 WORKDIR /app
 RUN chown node:node /app
 
+# Build-time identification: pass --build-arg GIT_SHA=$(git rev-parse HEAD)
+# (and optional GIT_BRANCH) so the running server can report the exact build
+# via GET / and /sha. Falls back gracefully when unset.
+ARG GIT_SHA=""
+ARG GIT_BRANCH=""
+ENV AI_SESSIONS_GIT_SHA=${GIT_SHA} \
+    AI_SESSIONS_GIT_BRANCH=${GIT_BRANCH}
+
 USER node
 
 # Default git identity for any commits the agent makes from inside the

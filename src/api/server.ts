@@ -19,6 +19,7 @@ import { openapi } from "./openapi.js";
 import * as cronStore from "../crons/store.js";
 import { makeJob, nextFireAfter } from "../crons/scheduler.js";
 import { getUsage } from "../usage/index.js";
+import { VERSION, GIT } from "../version.js";
 
 export function createApp() {
   const app = express();
@@ -27,7 +28,8 @@ export function createApp() {
   app.get("/", (_req, res) => {
     res.json({
       name: "ai-sessions",
-      version: "0.1.0",
+      version: VERSION,
+      git: GIT,
       yoloDefault: defaultYolo(),
       dataDir: dataDir(),
       workspaceDir: workspaceDir(),
@@ -35,6 +37,8 @@ export function createApp() {
       endpoints: Object.keys(openapi.paths),
     });
   });
+
+  app.get("/sha", (_req, res) => res.json(GIT));
 
   app.get("/openapi.json", (_req, res) => res.json(openapi));
 

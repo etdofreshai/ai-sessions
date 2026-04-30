@@ -186,7 +186,6 @@ export class TelegramChannel implements Channel {
     // Advertise slash commands in the bot menu. Best-effort — don't block start.
     remoteControl.installShutdownHook();
     this.restoreWatchers();
-    sessionWatcher.startExpiryTick();
     api
       .setMyCommands({ commands: SLASH_COMMANDS })
       .catch((e: any) => console.error("[telegram] setMyCommands failed:", e?.message ?? e));
@@ -659,7 +658,7 @@ export class TelegramChannel implements Channel {
       const token = arg.trim().toLowerCase();
 
       if (token === "" || token === "status" || token === "info" || token === "?") {
-        const text = await this.formatWatchStatus(ai);
+        const text = this.formatWatchStatus(ai);
         await api.sendMessage({ chat_id: chatId, text });
         return true;
       }
@@ -707,8 +706,6 @@ export class TelegramChannel implements Channel {
       }
       sessionWatcher.stop(ai.id);
       ai.watch = false;
-      ai.watchTtlMs = undefined;
-      ai.watchUntil = undefined;
       ai.watchStartedAt = undefined;
       aiStore.write(ai);
       await api.sendMessage({ chat_id: chatId, text: "Stopped watching." });
@@ -1801,29 +1798,18 @@ export class TelegramChannel implements Channel {
     return lines.join("\n");
   }
 
-  private async formatWatchStatus(ai: AiSession): Promise<string> {
-    const { formatTtl } = await import("../ai-sessions/watch.js");
+  private formatWatchStatus(ai: AiSession): string {
+    const fmt = (ms: number): string => {
+      if (ms < 60_000) return `${Math.max(0, Math.round(ms / 1000))}s`;
+      if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)}m`;
+      return `${(ms / (60 * 60_000)).toFixed(1)}h`;
+    };
     const lines: string[] = [];
 
-    // Mode + lifecycle from the persisted AiSession.
-    let mode = "off";
-    if (ai.watch === true) {
-      mode = ai.watchTtlMs ? `sliding ${formatTtl(ai.watchTtlMs)}` : "indefinite";
-    }
-    lines.push(`Mode:     ${mode}`);
-
+    lines.push(`Mode:    ${ai.watch === true ? "on" : "off"}`);
     if (ai.watchStartedAt) {
       const ms = Date.now() - new Date(ai.watchStartedAt).getTime();
-      lines.push(`Started:  ${ai.watchStartedAt} (${formatTtl(ms)} ago)`);
-    }
-
-    if (ai.watchUntil) {
-      const until = new Date(ai.watchUntil);
-      const ms = until.getTime() - Date.now();
-      const rel = ms > 0 ? `in ${formatTtl(ms)}` : `expired ${formatTtl(-ms)} ago`;
-      lines.push(`Expires:  ${rel} (${ai.watchUntil})`);
-    } else if (ai.watch === true) {
-      lines.push(`Expires:  n/a (no TTL — runs until /watch off)`);
+      lines.push(`Started: ${ai.watchStartedAt} (${fmt(ms)} ago)`);
     }
 
     // Live watcher state.

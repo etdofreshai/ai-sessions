@@ -42,10 +42,6 @@ export interface AiSession {
   // bound channel(s). Binary on/off — see /watch.
   watch?: boolean;
   watchStartedAt?: string;
-  // Legacy fields from the sliding-TTL watch design — no longer set, kept
-  // optional so existing on-disk AiSessions still parse cleanly.
-  watchTtlMs?: number;
-  watchUntil?: string;
   // Resume mode: when on, the server tracks background tasks the agent
   // launches during route turns (Bash run_in_background, Agent
   // run_in_background) and automatically fires a follow-up turn on the

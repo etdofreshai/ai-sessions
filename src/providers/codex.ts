@@ -16,6 +16,7 @@ import type {
 } from "./types.js";
 import { defaultYolo } from "./types.js";
 import { readJsonl, fileTimes } from "../sessions/jsonl.js";
+import { flattenContent } from "../sessions/content.js";
 import { CodexAppServer } from "./codex-rpc.js";
 
 const codexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");
@@ -29,15 +30,6 @@ interface CodexEntry {
   payload?: { role?: string; content?: unknown };
 }
 
-function flattenContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c: any) => (typeof c === "string" ? c : c?.text ?? JSON.stringify(c)))
-      .join("\n");
-  }
-  return content == null ? "" : JSON.stringify(content);
-}
 
 function deriveId(path: string): string {
   const base = basename(path, ".jsonl");

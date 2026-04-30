@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import * as aiStore from "../ai-sessions/store.js";
 import type { AiSession, ResumeBgTask } from "../ai-sessions/types.js";
 import { getProvider } from "../providers/index.js";
+import { runToCompletion } from "../runs/drain.js";
 import { channels as channelRegistry } from "../channels/index.js";
 import { disableResume, dropPendingTask, isResumeExpired } from "./state.js";
 
@@ -45,14 +46,15 @@ async function tickOnce(): Promise<void> {
     }
     if (completed.length === 0) continue;
 
-    // Drop them up front so we can't double-fire if the next tick lands
-    // before our re-entry turn finishes.
-    for (const c of completed) dropPendingTask(ai.id, c.id);
-
     try {
       await fireResume(ai, completed);
+      // Drop only on success — a transient provider failure shouldn't lose
+      // the resume work. Next tick will retry the same set of completed
+      // tasks. (Re-firing the same coalesced batch is fine; the model just
+      // sees the same prompt twice in the worst case.)
+      for (const c of completed) dropPendingTask(ai.id, c.id);
     } catch (e: any) {
-      console.error(`[resume] ${ai.id}: fire failed:`, e?.message ?? e);
+      console.error(`[resume] ${ai.id}: fire failed, will retry next tick:`, e?.message ?? e);
     }
   }
 }
@@ -104,19 +106,16 @@ async function fireResume(
     }
   }
 
-  const prompt = buildResumePrompt(completed);
-  const handle = getProvider(ai.provider).run({
-    prompt,
-    sessionId: ai.sessionId, // resume the same conversation
-    aiSessionId: ai.id,
-    cwd: ai.cwd,
-    yolo: true,
-    effort: ai.reasoningEffort,
-  });
-  for await (const _ of handle.events) {
-    /* discard intermediate events; final fanout below */
-  }
-  const meta = await handle.done;
+  const meta = await runToCompletion(
+    getProvider(ai.provider).run({
+      prompt: buildResumePrompt(completed),
+      sessionId: ai.sessionId, // resume the same conversation
+      aiSessionId: ai.id,
+      cwd: ai.cwd,
+      yolo: true,
+      effort: ai.reasoningEffort,
+    }),
+  );
 
   if (channel && chatId) {
     const text = (meta.output ?? "").trim() || (meta.error ? `Run failed: ${meta.error}` : "(no output)");

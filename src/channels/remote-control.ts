@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, createWriteStream } from "node:fs";
+import { createWriteStream } from "node:fs";
 import { join } from "node:path";
 import { dataDir } from "../config.js";
+import { ensureDir } from "../fsutil.js";
 import type { AiSession } from "../ai-sessions/types.js";
 
 interface Entry {
@@ -38,8 +39,7 @@ export function start(ai: AiSession): StartResult {
   if (isRunning(ai.id)) {
     return { ok: true, pid: registry.get(ai.id)!.child.pid, logPath: registry.get(ai.id)!.logPath };
   }
-  const logDir = join(dataDir(), "remote-control");
-  mkdirSync(logDir, { recursive: true });
+  const logDir = ensureDir(join(dataDir(), "remote-control"));
   const logPath = join(logDir, `${ai.id}.log`);
   const out = createWriteStream(logPath, { flags: "a" });
   const args = [

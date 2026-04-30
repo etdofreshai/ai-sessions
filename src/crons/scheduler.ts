@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { CronExpressionParser } from "cron-parser";
 import { getProvider } from "../providers/index.js";
+import { runToCompletion } from "../runs/drain.js";
 import * as aiStore from "../ai-sessions/store.js";
 import { channels as channelRegistry } from "../channels/index.js";
 import * as store from "./store.js";
@@ -74,23 +75,21 @@ async function fire(job: CronJob): Promise<void> {
     sessionId = t.sessionId;
   }
 
-  const handle = getProvider(provider).run({
-    prompt: t.prompt,
-    sessionId,
-    // Cron runs are ephemeral: don't let attachToMeta overwrite the
-    // AiSession's bound provider sessionId with this cron's fresh one.
-    aiSessionId: aiSession ? undefined : aiSessionId,
-    internal: aiSession ? true : undefined,
-    cwd: t.cwd ?? aiSession?.cwd,
-    yolo: true,
-    effort: aiSession?.reasoningEffort,
-  });
-  // Drain events so the run actually executes. We don't relay tool/image
-  // events from a cron-fired run yet — just the final text to bound channels.
-  for await (const _ of handle.events) {
-    /* discard */
-  }
-  const meta = await handle.done;
+  // Cron runs are ephemeral: don't let attachToMeta overwrite the
+  // AiSession's bound provider sessionId with this cron's fresh one.
+  // We don't relay tool/image events from a cron-fired run yet — just the
+  // final text to bound channels.
+  const meta = await runToCompletion(
+    getProvider(provider).run({
+      prompt: t.prompt,
+      sessionId,
+      aiSessionId: aiSession ? undefined : aiSessionId,
+      internal: aiSession ? true : undefined,
+      cwd: t.cwd ?? aiSession?.cwd,
+      yolo: true,
+      effort: aiSession?.reasoningEffort,
+    }),
+  );
 
   // Fan out the run's final text to any channels bound to this AiSession.
   // User-initiated runs (e.g. Telegram /msg) already publish their own

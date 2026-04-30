@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { dataDir } from "../config.js";
+import { ensureDir } from "../fsutil.js";
 import type { TelegramApi } from "./telegram-api.js";
 
 export interface DownloadedFile {
@@ -26,8 +27,7 @@ export async function downloadTelegramFile(
   }
   const buf = Buffer.from(await res.arrayBuffer());
 
-  const dir = join(dataDir(), "uploads", opts.aiSessionId ?? "_unbound");
-  mkdirSync(dir, { recursive: true });
+  const dir = ensureDir(join(dataDir(), "uploads", opts.aiSessionId ?? "_unbound"));
 
   // Prefer caller-provided name; else use the tail of the telegram file_path.
   let name = opts.preferredName ?? basename(meta.file_path);

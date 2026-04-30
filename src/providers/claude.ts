@@ -16,6 +16,7 @@ import type {
 } from "./types.js";
 import { defaultYolo } from "./types.js";
 import { readJsonl, fileTimes } from "../sessions/jsonl.js";
+import { flattenContent } from "../sessions/content.js";
 
 const claudeHome = () => process.env.CLAUDE_HOME || join(homedir(), ".claude");
 const projectsDir = () => join(claudeHome(), "projects");
@@ -26,16 +27,6 @@ interface ClaudeEntry {
   timestamp?: string;
   sessionId?: string;
   cwd?: string;
-}
-
-function flattenContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c: any) => (typeof c === "string" ? c : c?.text ?? JSON.stringify(c)))
-      .join("\n");
-  }
-  return content == null ? "" : JSON.stringify(content);
 }
 
 function guessImageMediaType(filename?: string, mimeType?: string): string {

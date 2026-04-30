@@ -1,12 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { dataDir } from "../config.js";
+import { ensureDir } from "../fsutil.js";
 import type { UsageSnapshot } from "./types.js";
 
 function dir(): string {
-  const d = join(dataDir(), "usage");
-  if (!existsSync(d)) mkdirSync(d, { recursive: true });
-  return d;
+  return ensureDir(join(dataDir(), "usage"));
 }
 
 export function read(provider: string): UsageSnapshot | null {

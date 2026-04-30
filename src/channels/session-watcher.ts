@@ -8,8 +8,7 @@ import {
 } from "node:fs";
 import { getProvider } from "../providers/index.js";
 import type { AiSession } from "../ai-sessions/types.js";
-import * as aiStore from "../ai-sessions/store.js";
-import { isExpired } from "../ai-sessions/watch.js";
+import { flattenVisibleText } from "../sessions/content.js";
 
 export type ForwardFn = (role: "user" | "assistant", text: string) => void;
 
@@ -130,7 +129,7 @@ async function readNew(e: Entry): Promise<void> {
       }
       const role = parsed?.message?.role;
       if (role !== "user" && role !== "assistant") continue;
-      const flat = flattenContent(parsed?.message?.content);
+      const flat = flattenVisibleText(parsed?.message?.content);
       if (!flat) continue;
       e.forward(role, flat);
       e.lastForwardedAt = Date.now();
@@ -140,21 +139,6 @@ async function readNew(e: Entry): Promise<void> {
   } finally {
     e.reading = false;
   }
-}
-
-// Pulls plain user-visible text out of a claude message body. Skips tool_use
-// and tool_result blocks so the channel doesn't get spammed with internals.
-function flattenContent(content: unknown): string {
-  if (typeof content === "string") return content.trim();
-  if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const c of content as any[]) {
-      if (typeof c === "string") parts.push(c);
-      else if (c && c.type === "text" && typeof c.text === "string") parts.push(c.text);
-    }
-    return parts.join("\n").trim();
-  }
-  return "";
 }
 
 export function stop(aiId: string): boolean {
@@ -252,7 +236,7 @@ export function readLatestEntry(path: string): DiskTailEntry | null {
     }
     const role = parsed?.message?.role;
     if (role !== "user" && role !== "assistant") continue;
-    const flat = flattenContent(parsed?.message?.content);
+    const flat = flattenVisibleText(parsed?.message?.content);
     if (!flat) continue;
     return {
       role,
@@ -279,38 +263,6 @@ export function mute(aiId: string): () => void {
     }
     e.partial = "";
   };
-}
-
-// Periodic sweep: stop watchers whose sliding deadline has passed and clear
-// the AiSession's TTL fields so a future /watch starts cleanly.
-let expiryTimer: NodeJS.Timeout | null = null;
-const EXPIRY_TICK_MS = 30_000;
-
-export function startExpiryTick(): void {
-  if (expiryTimer) return;
-  const run = (): void => {
-    for (const aiId of [...entries.keys()]) {
-      const ai = aiStore.read(aiId);
-      if (!ai) {
-        stop(aiId);
-        continue;
-      }
-      if (isExpired(ai)) {
-        stop(aiId);
-        ai.watchUntil = undefined;
-        ai.watchTtlMs = undefined;
-        ai.watch = false;
-        aiStore.write(ai);
-      }
-    }
-  };
-  expiryTimer = setInterval(run, EXPIRY_TICK_MS);
-  if (typeof expiryTimer.unref === "function") expiryTimer.unref();
-}
-
-export function stopExpiryTick(): void {
-  if (expiryTimer) clearInterval(expiryTimer);
-  expiryTimer = null;
 }
 
 export function stopAll(): void {

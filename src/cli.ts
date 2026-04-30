@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { getProvider, listProviderNames, providers } from "./providers/index.js";
 import { startServer } from "./api/server.js";
 import { port as defaultPort } from "./config.js";
+import { VERSION } from "./version.js";
 import { getLive, listRunIds, loadFromDisk } from "./runs/registry.js";
 import * as aiStore from "./ai-sessions/store.js";
 import { channels as channelRegistry, listChannelNames } from "./channels/index.js";
@@ -15,7 +16,7 @@ const program = new Command();
 program
   .name("ai-sessions")
   .description("Thin CLI to call, manage, and view sessions across claude, codex, and opencode")
-  .version("0.1.0");
+  .version(VERSION);
 
 program
   .command("providers")

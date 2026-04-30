@@ -5,12 +5,6 @@ export const channels: Record<string, Channel> = {
   telegram: telegramChannel,
 };
 
-export function getChannel(name: string): Channel {
-  const c = channels[name];
-  if (!c) throw new Error(`unknown channel: ${name}`);
-  return c;
-}
-
 export function listChannelNames(): string[] {
   return Object.keys(channels);
 }

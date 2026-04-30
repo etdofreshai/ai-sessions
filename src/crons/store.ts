@@ -1,15 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { dataDir } from "../config.js";
+import { ensureDir } from "../fsutil.js";
 import type { CronJob } from "./types.js";
 
 // Crons live under dataDir (per-machine state), not workspaceDir (shared
 // across machines via git sync). Otherwise scheduled jobs configured on one
 // machine would silently fire on every other machine that pulls the workspace.
 function cronsDir(): string {
-  const dir = join(dataDir(), "crons");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  return dir;
+  return ensureDir(join(dataDir(), "crons"));
 }
 
 function pathFor(name: string): string {

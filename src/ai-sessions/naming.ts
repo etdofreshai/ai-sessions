@@ -1,5 +1,6 @@
 import { getProvider } from "../providers/index.js";
 import { defaultAgent } from "../config.js";
+import { runToCompletion } from "../runs/drain.js";
 
 const NAMING_PROMPT = `Generate a 3-5 word title summarizing the topic of a conversation that begins with the user message below. Reply with ONLY the title — no quotes, no punctuation, no preamble.
 
@@ -22,15 +23,13 @@ export async function generateNameFromTranscript(transcript: string): Promise<st
   const agent = defaultAgent();
   try {
     const provider = getProvider(agent);
-    const handle = provider.run({
-      prompt: RENAME_PROMPT + transcript,
-      yolo: true,
-      internal: true,
-    });
-    for await (const _ of handle.events) {
-      /* drain */
-    }
-    const meta = await handle.done;
+    const meta = await runToCompletion(
+      provider.run({
+        prompt: RENAME_PROMPT + transcript,
+        yolo: true,
+        internal: true,
+      }),
+    );
     if (meta.status !== "completed" || !meta.output) return "untitled";
     return (
       meta.output.trim().replace(/^["']|["']$/g, "").slice(0, 80) || "untitled"
@@ -46,16 +45,13 @@ export async function generateName(prompt: string): Promise<string> {
   const agent = defaultAgent();
   try {
     const provider = getProvider(agent);
-    const handle = provider.run({
-      prompt: NAMING_PROMPT + prompt,
-      yolo: true,
-      internal: true,
-    });
-    // Drain events; we only need the final output.
-    for await (const _ of handle.events) {
-      /* discard */
-    }
-    const meta = await handle.done;
+    const meta = await runToCompletion(
+      provider.run({
+        prompt: NAMING_PROMPT + prompt,
+        yolo: true,
+        internal: true,
+      }),
+    );
     if (meta.status !== "completed" || !meta.output) return fallback(prompt);
     return meta.output.trim().replace(/^["']|["']$/g, "").slice(0, 80) || fallback(prompt);
   } catch {

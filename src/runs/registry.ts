@@ -1,15 +1,14 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { dataDir } from "../config.js";
+import { ensureDir } from "../fsutil.js";
 import type { RunEvent, RunHandle, RunMetadata, RunStatus } from "./types.js";
 
 const live = new Map<string, RunHandle>();
 
 function runsDir(): string {
-  const dir = join(dataDir(), "runs");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  return dir;
+  return ensureDir(join(dataDir(), "runs"));
 }
 
 function runPath(runId: string): string {

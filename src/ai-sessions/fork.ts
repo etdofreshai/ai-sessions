@@ -1,4 +1,5 @@
 import { getProvider } from "../providers/index.js";
+import { runToCompletion } from "../runs/drain.js";
 import * as store from "./store.js";
 import { summarizeTranscript } from "./summarize.js";
 import type { AiSession } from "./types.js";
@@ -81,16 +82,14 @@ export async function forkAiSession(args: {
   // Run the seed on the target provider as an internal run (so it doesn't
   // auto-create yet another AiSession). We attach explicitly below.
   const targetProvider = getProvider(args.targetProvider);
-  const handle = targetProvider.run({
-    prompt: seed,
-    cwd: args.cwd,
-    yolo: true,
-    internal: true,
-  });
-  for await (const _ of handle.events) {
-    /* drain — caller of fork doesn't need the seed-run output */
-  }
-  const meta = await handle.done;
+  const meta = await runToCompletion(
+    targetProvider.run({
+      prompt: seed,
+      cwd: args.cwd,
+      yolo: true,
+      internal: true,
+    }),
+  );
   if (meta.status !== "completed" || !meta.sessionId) {
     throw new Error(
       `seed run on ${args.targetProvider} did not complete (status=${meta.status}${

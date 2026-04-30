@@ -1,6 +1,5 @@
 import {
   existsSync,
-  mkdirSync,
   readFileSync,
   readdirSync,
   unlinkSync,
@@ -9,12 +8,11 @@ import {
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { dataDir } from "../config.js";
+import { ensureDir } from "../fsutil.js";
 import type { AiSession } from "./types.js";
 
 function sessionsDir(): string {
-  const dir = join(dataDir(), "sessions");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  return dir;
+  return ensureDir(join(dataDir(), "sessions"));
 }
 
 function sessionPath(id: string): string {

@@ -5,6 +5,18 @@ import { workspaceDir, defaultReasoningEffort, isReasoningEffort } from "../conf
 import { listSkills } from "../skills/catalog.js";
 import { previewFromJsonl, shortenPath } from "../sessions/preview.js";
 import { markdownToTelegramHtml } from "./telegram-format.js";
+import { openStatusBlock } from "./telegram-status.js";
+import {
+  type TraceRecord,
+  formatToolInput,
+  renderTraceMarkdown,
+  renderTranscriptMarkdown,
+  isContextOverflow,
+  shortStamp,
+  stringifyOutput,
+  chunk,
+  sleep,
+} from "./telegram-utils.js";
 import { downloadTelegramFile } from "./telegram-download.js";
 import * as remoteControl from "./remote-control.js";
 import * as sessionWatcher from "./session-watcher.js";
@@ -72,25 +84,6 @@ interface ChatInbox {
   text: string;
   attachments: Attachment[];
   timer: NodeJS.Timeout | null;
-}
-
-interface TraceEvent {
-  ts: number;
-  type: "tool_use" | "tool_result" | "error";
-  name?: string;
-  input?: unknown;
-  output?: unknown;
-  message?: string;
-}
-
-interface TraceRecord {
-  source: "route" | "agent" | "btw";
-  label?: string;
-  prompt: string;
-  startedAt: number;
-  finishedAt?: number;
-  events: TraceEvent[];
-  finalText?: string;
 }
 
 function token(): string | null {
@@ -2180,275 +2173,11 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  // Creates an initial "thinking…" message and returns a controller that
-  // batches edits (≥1.5s apart) and supports a final replacement.
-  private async openStatusBlock(chatId: number): Promise<{
-    push: (line: string) => void;
-    appendText: (chunk: string) => void;
-    markLastDone: () => void;
-    finalize: (text: string) => Promise<void>;
-  }> {
-    const api = this.api!;
-    let messageId: number | null = null;
-    const lines: string[] = ["🤔 thinking…"];
-    // Index of the in-progress "💬 …" text line within `lines`, if any.
-    // Subsequent text chunks append into that slot; any non-text push freezes
-    // it (sets to null) so the next text chunk starts a fresh line.
-    let currentTextIdx: number | null = null;
-    let lastEditAt = 0;
-    let pending: NodeJS.Timeout | null = null;
-    const MIN_INTERVAL = 1500;
-    const MAX_LINES = 12;
-    const TEXT_LINE_MAX = 800;
-
-    const render = () => lines.join("\n").slice(0, 4000) || "🤔 thinking…";
-
-    try {
-      const m = await api.sendMessage({ chat_id: chatId, text: render() });
-      messageId = m.message_id;
-      lastEditAt = Date.now();
-    } catch {
-      /* ignore — best-effort */
-    }
-
-    const editNow = async (): Promise<void> => {
-      if (messageId == null) return;
-      try {
-        await api.editMessageText({
-          chat_id: chatId,
-          message_id: messageId,
-          text: render(),
-        });
-        lastEditAt = Date.now();
-      } catch {
-        /* "message is not modified" / rate limit — ignore */
-      }
-    };
-
-    const schedule = (): void => {
-      if (pending) return;
-      const wait = Math.max(0, MIN_INTERVAL - (Date.now() - lastEditAt));
-      pending = setTimeout(() => {
-        pending = null;
-        void editNow();
-      }, wait);
-    };
-
-    const dropPlaceholder = (): void => {
-      if (lines.length === 1 && lines[0] === "🤔 thinking…") lines.length = 0;
-    };
-
-    const trimLines = (): void => {
-      if (lines.length <= MAX_LINES) return;
-      const dropCount = lines.length - MAX_LINES;
-      lines.splice(0, dropCount);
-      if (currentTextIdx != null) {
-        currentTextIdx -= dropCount;
-        if (currentTextIdx < 0) currentTextIdx = null;
-      }
-    };
-
-    return {
-      push: (line: string) => {
-        dropPlaceholder();
-        // Any non-text line ends the current streaming text block, so the
-        // next text chunk starts in its own bubble line.
-        currentTextIdx = null;
-        lines.push(line);
-        trimLines();
-        schedule();
-      },
-      appendText: (chunk: string) => {
-        if (!chunk) return;
-        dropPlaceholder();
-        if (currentTextIdx == null) {
-          lines.push(`💬 ${chunk}`);
-          currentTextIdx = lines.length - 1;
-        } else {
-          let cur = lines[currentTextIdx] + chunk;
-          // Keep the live preview compact — long replies still appear in full
-          // when finalize() swaps in the final response.
-          if (cur.length > TEXT_LINE_MAX + 2) {
-            cur = "💬 …" + cur.slice(-TEXT_LINE_MAX);
-          }
-          lines[currentTextIdx] = cur;
-        }
-        trimLines();
-        schedule();
-      },
-      markLastDone: () => {
-        const last = lines[lines.length - 1];
-        if (last && last.startsWith("🔧 ")) {
-          lines[lines.length - 1] = last.replace(/^🔧/, "✓");
-        }
-        schedule();
-      },
-      finalize: async (text: string) => {
-        if (pending) {
-          clearTimeout(pending);
-          pending = null;
-        }
-        if (messageId == null) {
-          await this.send({ chatId }, { text });
-          return;
-        }
-        const head = text.slice(0, 4096);
-        const headHtml = markdownToTelegramHtml(head);
-        try {
-          await api.editMessageText({
-            chat_id: chatId,
-            message_id: messageId,
-            text: headHtml,
-            parse_mode: "HTML",
-          });
-        } catch {
-          // HTML rejected → retry plain.
-          try {
-            await api.editMessageText({
-              chat_id: chatId,
-              message_id: messageId,
-              text: head,
-            });
-          } catch {
-            /* ignore */
-          }
-        }
-        if (text.length > 4096) {
-          await this.send({ chatId }, { text: text.slice(4096) });
-        }
-      },
-    };
+  private openStatusBlock(chatId: number) {
+    return openStatusBlock(this.api!, chatId, async (text) => {
+      await this.send({ chatId }, { text });
+    });
   }
-}
-
-function formatToolInput(input: unknown): string {
-  if (input == null) return "";
-  if (typeof input === "string") return input.split(/\r?\n/)[0].slice(0, 60);
-  try {
-    const s = JSON.stringify(input);
-    return s.length > 60 ? s.slice(0, 57) + "..." : s;
-  } catch {
-    return "";
-  }
-}
-
-function renderTraceMarkdown(trace: TraceRecord): string {
-  const lines: string[] = [];
-  const dur = trace.finishedAt
-    ? `${((trace.finishedAt - trace.startedAt) / 1000).toFixed(1)}s`
-    : `${((Date.now() - trace.startedAt) / 1000).toFixed(1)}s (in progress)`;
-  lines.push(`# Trace — ${trace.source}${trace.label ? ` (${trace.label})` : ""}`);
-  lines.push("");
-  lines.push(`- Started: ${new Date(trace.startedAt).toISOString()}`);
-  lines.push(`- Duration: ${dur}`);
-  lines.push(`- Events: ${trace.events.length}`);
-  lines.push("");
-  lines.push("## Prompt");
-  lines.push("");
-  lines.push("```");
-  lines.push(trace.prompt);
-  lines.push("```");
-  lines.push("");
-  lines.push("## Events");
-  lines.push("");
-  for (let i = 0; i < trace.events.length; i++) {
-    const ev = trace.events[i];
-    const t = `+${((ev.ts - trace.startedAt) / 1000).toFixed(1)}s`;
-    if (ev.type === "tool_use") {
-      lines.push(`### ${i + 1}. 🔧 ${ev.name ?? "tool"} (${t})`);
-      lines.push("");
-      lines.push("```json");
-      lines.push(safeStringify(ev.input));
-      lines.push("```");
-    } else if (ev.type === "tool_result") {
-      lines.push(`### ${i + 1}. ✓ ${ev.name ?? "tool result"} (${t})`);
-      lines.push("");
-      lines.push("```");
-      lines.push(stringifyOutput(ev.output));
-      lines.push("```");
-    } else if (ev.type === "error") {
-      lines.push(`### ${i + 1}. ❌ error (${t})`);
-      lines.push("");
-      lines.push("```");
-      lines.push(ev.message ?? "");
-      lines.push("```");
-    }
-    lines.push("");
-  }
-  lines.push("## Response");
-  lines.push("");
-  lines.push(trace.finalText ?? "(in progress)");
-  return lines.join("\n");
-}
-
-function safeStringify(v: unknown): string {
-  if (v == null) return "";
-  if (typeof v === "string") return v;
-  try {
-    return JSON.stringify(v, null, 2);
-  } catch {
-    return String(v);
-  }
-}
-
-function stringifyOutput(v: unknown): string {
-  if (v == null) return "";
-  if (typeof v === "string") return v;
-  return safeStringify(v);
-}
-
-function isContextOverflow(message: string | null | undefined): boolean {
-  if (!message) return false;
-  // Cap the keyword check to short error messages — a long stack trace that
-  // incidentally mentions "context" or "tokens" shouldn't trigger a retry.
-  if (message.length > 500) return false;
-  const m = message.toLowerCase();
-  return (
-    m.includes("prompt is too long") ||
-    m.includes("input is too long") ||
-    m.includes("context length") ||
-    m.includes("token limit") ||
-    m.includes("max_tokens") ||
-    m.includes("too many tokens")
-  );
-}
-
-function shortStamp(d: Date = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function renderTranscriptMarkdown(ai: AiSession, detail: SessionDetail): string {
-  const header = [
-    `# ${ai.name ?? "(unnamed)"}`,
-    "",
-    `- Session: \`${ai.id}\``,
-    `- Provider: ${ai.provider}`,
-    `- Provider session: \`${ai.sessionId ?? ""}\``,
-    `- cwd: ${ai.cwd ?? "(unset)"}`,
-    `- Messages: ${detail.messages.length}`,
-    `- Exported: ${new Date().toISOString()}`,
-    "",
-    "---",
-    "",
-  ].join("\n");
-  const body = detail.messages
-    .map((m) => {
-      const ts = m.timestamp ? ` _(${m.timestamp})_` : "";
-      return `## ${m.role}${ts}\n\n${m.content}\n`;
-    })
-    .join("\n");
-  return header + body;
-}
-
-function chunk(s: string, size: number): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
-  return out.length ? out : [""];
-}
-
-function sleep(ms: number) {
-  return new Promise<void>((r) => setTimeout(r, ms));
 }
 
 export const telegramChannel = new TelegramChannel();

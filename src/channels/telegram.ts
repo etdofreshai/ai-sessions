@@ -45,6 +45,7 @@ const SLASH_COMMANDS = [
   { command: "usage", description: "Show rate-limit usage across providers (5h / weekly windows)" },
   { command: "cron", description: "Manage scheduled prompts on this chat: /cron add|ls|rm" },
   { command: "sha", description: "Show server's git commit, or git status of a path: /sha [<relative-or-absolute-dir>]" },
+  { command: "ls", description: "List files in a directory on the server: /ls [<relative-or-absolute-dir>]" },
 ];
 
 interface PendingBinding {
@@ -986,6 +987,67 @@ export class TelegramChannel implements Channel {
           caption: `Trace: ${trace.events.length} events${trace.finalText ? `, response ${trace.finalText.length} chars` : " (in progress)"}`,
         });
       }
+      return true;
+    }
+
+    if (cmd === "/ls") {
+      const target = arg.trim() || ".";
+      const { resolve, isAbsolute } = await import("node:path");
+      const { workspaceDir } = await import("../config.js");
+      const ai = aiStore.findByTelegramChat(chatId);
+      const baseDir = ai?.cwd ?? workspaceDir();
+      const path = isAbsolute(target) ? target : resolve(baseDir, target);
+      const { existsSync, statSync, readdirSync } = await import("node:fs");
+      if (!existsSync(path)) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Path:    ${path}\n(does not exist)`,
+        });
+        return true;
+      }
+      let st;
+      try {
+        st = statSync(path);
+      } catch (e: any) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Path:    ${path}\n(stat failed: ${e?.message ?? e})`,
+        });
+        return true;
+      }
+      if (!st.isDirectory()) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Path:    ${path}\nType:    file\nSize:    ${st.size} bytes`,
+        });
+        return true;
+      }
+      let entries: import("node:fs").Dirent[];
+      try {
+        entries = readdirSync(path, { withFileTypes: true });
+      } catch (e: any) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Path:    ${path}\n(readdir failed: ${e?.message ?? e})`,
+        });
+        return true;
+      }
+      entries.sort((a, b) => {
+        // Directories first, then alphabetical.
+        const ad = a.isDirectory() ? 0 : 1;
+        const bd = b.isDirectory() ? 0 : 1;
+        if (ad !== bd) return ad - bd;
+        return a.name.localeCompare(b.name);
+      });
+      const MAX = 200;
+      const shown = entries.slice(0, MAX);
+      const lines = [
+        `Path: ${path}`,
+        `Items: ${entries.length}${entries.length > MAX ? ` (showing first ${MAX})` : ""}`,
+        "",
+        ...shown.map((e) => (e.isDirectory() ? `📁 ${e.name}/` : `📄 ${e.name}`)),
+      ];
+      await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
       return true;
     }
 

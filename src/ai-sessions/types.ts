@@ -2,6 +2,24 @@ export interface SessionChannelBindings {
   telegram?: { chatId: number; threadId?: number };
 }
 
+// Background task launched by the agent during a route turn — captured so
+// resume mode can poll the output file and re-enter the session when done.
+export interface ResumeBgTask {
+  // The Bash background task id ("bxxx") or Agent agentId ("agt_…").
+  id: string;
+  outputFile: string;
+  // What kind of background tool emitted this — drives how we format the
+  // re-entry prompt and how we recognize completion.
+  kind: "bash" | "agent";
+  // Optional human-friendly label for status display (the agent's own
+  // description, or the first ~80 chars of the command).
+  label?: string;
+  launchedAt: string;
+  // Set once the poller has fired its re-entry turn for this task; the
+  // entry is then dropped from the pending list on the next persist.
+  firedAt?: string;
+}
+
 export interface AiSession {
   id: string; // UUID
   name: string | null;
@@ -21,19 +39,23 @@ export interface AiSession {
   reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   channels?: SessionChannelBindings;
   // Mirror new entries from the provider session's transcript file into the
-  // bound channel(s). `true` = indefinite (no auto-expiry); a finite watch
-  // uses watchTtlMs + watchUntil for a sliding-window auto-stop. After every
-  // forwarded entry or completed run on this session, watchUntil is bumped
-  // forward by watchTtlMs.
+  // bound channel(s). Binary on/off — see /watch.
   watch?: boolean;
-  // Sliding-window length in ms. When set, watchUntil is recomputed each
-  // time activity is seen; once watchUntil < now, the watcher self-stops.
-  watchTtlMs?: number;
-  // Absolute ISO timestamp at which the watcher should stop unless slid.
-  watchUntil?: string;
-  // ISO timestamp of when the current watch was started (or last toggled
-  // back on). Used by /watch status to show "Started: X (Y ago)".
   watchStartedAt?: string;
+  // Legacy fields from the sliding-TTL watch design — no longer set, kept
+  // optional so existing on-disk AiSessions still parse cleanly.
+  watchTtlMs?: number;
+  watchUntil?: string;
+  // Resume mode: when on, the server tracks background tasks the agent
+  // launches during route turns (Bash run_in_background, Agent
+  // run_in_background) and automatically fires a follow-up turn on the
+  // same provider session when one finishes — so the agent picks up
+  // where it left off without the user having to ping it. Sliding TTL
+  // (resumeUntil) means it auto-stops after ~60min of silence.
+  resume?: boolean;
+  resumeStartedAt?: string;
+  resumeUntil?: string;
+  resumePendingTasks?: ResumeBgTask[];
   // Last assistant message we sent to the bound channel for this session,
   // regardless of source (routeToSession final reply OR session-watcher
   // forward). /watch status reads from this so users see the actual most

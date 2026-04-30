@@ -45,6 +45,7 @@ const SLASH_COMMANDS = [
   { command: "usage", description: "Show rate-limit usage across providers (5h / weekly windows)" },
   { command: "cron", description: "Manage scheduled prompts on this chat: /cron add|ls|rm" },
   { command: "sha", description: "Show server's git commit, or git status of a path: /sha [<relative-or-absolute-dir>]" },
+  { command: "resume", description: "Auto-continue session when bg tasks finish: /resume | /resume on | /resume off" },
   { command: "ls", description: "List files in a directory on the server: /ls [<relative-or-absolute-dir>]" },
 ];
 
@@ -1036,6 +1037,40 @@ export class TelegramChannel implements Channel {
       return true;
     }
 
+    if (cmd === "/resume") {
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (!ai) {
+        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
+        return true;
+      }
+      const token = arg.trim().toLowerCase();
+      const { enableResume, disableResume } = await import("../resume/state.js");
+
+      if (token === "on") {
+        enableResume(ai);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: "Resume on — bg tasks launched in this session will auto-continue when they finish. Auto-off after 60m of silence.",
+        });
+        return true;
+      }
+      if (token === "off") {
+        disableResume(ai);
+        await api.sendMessage({ chat_id: chatId, text: "Resume off." });
+        return true;
+      }
+      if (token === "" || token === "status" || token === "?") {
+        const text = this.formatResumeStatus(ai);
+        await api.sendMessage({ chat_id: chatId, text });
+        return true;
+      }
+      await api.sendMessage({
+        chat_id: chatId,
+        text: "Usage: /resume | /resume on | /resume off",
+      });
+      return true;
+    }
+
     if (cmd === "/sha") {
       const target = arg.trim();
       // No arg → server build SHA from baked env / runtime detection.
@@ -1734,6 +1769,38 @@ export class TelegramChannel implements Channel {
 
   // Builds the forwarder used by session-watcher: pretty-prints role+text
   // and pushes it to the bound chat. Long messages are chunked by send().
+  private formatResumeStatus(ai: AiSession): string {
+    const fmt = (ms: number): string => {
+      if (ms < 60_000) return `${Math.max(0, Math.round(ms / 1000))}s`;
+      if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)}m`;
+      return `${(ms / (60 * 60_000)).toFixed(1)}h`;
+    };
+    const lines: string[] = [];
+    if (ai.resume !== true) {
+      lines.push("Mode:    off");
+      lines.push("(no auto-continue on bg task completion)");
+      return lines.join("\n");
+    }
+    lines.push("Mode:    on");
+    if (ai.resumeStartedAt) {
+      const ms = Date.now() - new Date(ai.resumeStartedAt).getTime();
+      lines.push(`Started: ${ai.resumeStartedAt} (${fmt(ms)} ago)`);
+    }
+    if (ai.resumeUntil) {
+      const ms = new Date(ai.resumeUntil).getTime() - Date.now();
+      const rel = ms > 0 ? `in ${fmt(ms)}` : `expired ${fmt(-ms)} ago`;
+      lines.push(`Expires: ${rel} (${ai.resumeUntil})`);
+    }
+    const pending = ai.resumePendingTasks ?? [];
+    lines.push("");
+    lines.push(`Pending bg tasks: ${pending.length}`);
+    for (const t of pending) {
+      const age = fmt(Date.now() - new Date(t.launchedAt).getTime());
+      lines.push(`  ${t.kind} ${t.id}  (launched ${age} ago)${t.label ? `  — ${t.label}` : ""}`);
+    }
+    return lines.join("\n");
+  }
+
   private async formatWatchStatus(ai: AiSession): Promise<string> {
     const { formatTtl } = await import("../ai-sessions/watch.js");
     const lines: string[] = [];
@@ -1805,18 +1872,23 @@ export class TelegramChannel implements Channel {
     return (role, text) => {
       const prefix = role === "user" ? "👤" : "🤖";
       void this.send({ chatId }, { text: `${prefix} ${text}` });
-      // Record this as the latest message the bot put in chat so /watch
-      // status reflects the user's actual view.
-      try {
-        const ai = aiStore.findByTelegramChat(chatId);
-        if (ai) {
+      void (async () => {
+        try {
+          const ai = aiStore.findByTelegramChat(chatId);
+          if (!ai) return;
           ai.lastBotMessageAt = new Date().toISOString();
           ai.lastBotMessagePreview = `${prefix} ${text}`.slice(0, 240);
-          aiStore.write(ai);
+          // External provider activity slides the resume TTL too.
+          if (ai.resume === true) {
+            const { slideResume } = await import("../resume/state.js");
+            slideResume(ai); // persists
+          } else {
+            aiStore.write(ai);
+          }
+        } catch (e) {
+          console.error("[telegram] forward persist failed:", e);
         }
-      } catch (e) {
-        console.error("[watch] forward persist failed:", e);
-      }
+      })();
     };
   }
 
@@ -1957,6 +2029,9 @@ export class TelegramChannel implements Channel {
       });
       const live = getLive(handle.meta.runId);
       const sentImagePaths = new Set<string>();
+      // Last tool_use seen — used to pair the next tool_result with its name
+      // and input, so we can detect Bash/Agent run_in_background launches.
+      let pendingTool: { name: string; input: any } | null = null;
       const watcher = (async () => {
         if (!live) return;
         for await (const ev of live.events) {
@@ -1964,6 +2039,7 @@ export class TelegramChannel implements Channel {
             const inputStr = formatToolInput(ev.input);
             status.push(`🔧 ${ev.name}${inputStr ? `: ${inputStr}` : ""}`);
             trace.events.push({ ts: Date.now(), type: "tool_use", name: ev.name, input: ev.input });
+            pendingTool = { name: ev.name, input: ev.input };
           } else if (ev.type === "text") {
             // Stream model text into the status bubble so the user sees
             // intermediate narration (e.g. "Let me check…") as it arrives,
@@ -1974,6 +2050,24 @@ export class TelegramChannel implements Channel {
             // Mark previous tool line as complete; light touch.
             status.markLastDone();
             trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
+            // Resume detection: if the tool that just resolved was a
+            // backgrounded Bash/Agent launch, record the task so the
+            // resume poller can pick up its completion later.
+            if (pendingTool) {
+              try {
+                const { detectBgLaunch } = await import("../resume/detect.js");
+                const { recordPendingTask } = await import("../resume/state.js");
+                const task = detectBgLaunch({
+                  toolName: pendingTool.name,
+                  toolInput: pendingTool.input,
+                  toolOutput: ev.output,
+                });
+                if (task) recordPendingTask(ai.id, task);
+              } catch (e) {
+                console.error("[resume] capture failed:", e);
+              }
+              pendingTool = null;
+            }
           } else if (ev.type === "image") {
             try {
               const { readFileSync } = await import("node:fs");
@@ -2067,10 +2161,20 @@ export class TelegramChannel implements Channel {
         if (fresh) {
           fresh.lastBotMessageAt = new Date().toISOString();
           fresh.lastBotMessagePreview = finalText.slice(0, 240);
-          aiStore.write(fresh);
+          // Resume default-on: any chat-bound session whose resume state has
+          // never been set gets it enabled on the first route turn. After
+          // that, slide the TTL on every assistant response.
+          const { enableResume, slideResume } = await import("../resume/state.js");
+          if (fresh.resume === undefined) {
+            enableResume(fresh);
+          } else if (fresh.resume === true) {
+            slideResume(fresh);
+          } else {
+            aiStore.write(fresh);
+          }
         }
       } catch (e) {
-        console.error("[watch] post-route persist failed:", e);
+        console.error("[telegram] post-route persist failed:", e);
       }
     } catch (e: any) {
       console.error("[telegram] routeToSession error:", e?.stack ?? e?.message ?? e);

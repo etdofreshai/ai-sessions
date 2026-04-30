@@ -407,7 +407,9 @@ program
   .option("-p, --port <port>", "port", (v) => parseInt(v, 10), defaultPort())
   .action(async (opts: { port: number }) => {
     const { startScheduler } = await import("./crons/scheduler.js");
+    const { startResumePoller } = await import("./resume/poller.js");
     startScheduler();
+    startResumePoller();
     startServer(opts.port);
   });
 

@@ -655,12 +655,9 @@ export class TelegramChannel implements Channel {
         await api.sendMessage({ chat_id: chatId, text: "Not bound." });
         return true;
       }
-      const { parseTtl, formatTtl, slideWatch, DEFAULT_WATCH_TTL_MS } = await import(
-        "../ai-sessions/watch.js"
-      );
       const token = arg.trim().toLowerCase();
 
-      if (token === "status" || token === "info" || token === "?") {
+      if (token === "" || token === "status" || token === "info" || token === "?") {
         const text = await this.formatWatchStatus(ai);
         await api.sendMessage({ chat_id: chatId, text });
         return true;
@@ -669,62 +666,34 @@ export class TelegramChannel implements Channel {
       if (token === "off") {
         sessionWatcher.stop(ai.id);
         ai.watch = false;
-        ai.watchTtlMs = undefined;
-        ai.watchUntil = undefined;
         ai.watchStartedAt = undefined;
         aiStore.write(ai);
         await api.sendMessage({ chat_id: chatId, text: "Stopped watching." });
         return true;
       }
 
-      const wasOff = ai.watch !== true;
-
-      // Indefinite mode: /watch on. No sliding — runs until /watch off.
       if (token === "on") {
         const r = await sessionWatcher.start(ai, this.makeForwardFn(chatId));
         if (!r.ok) {
           await api.sendMessage({ chat_id: chatId, text: `Watch failed: ${r.error}` });
           return true;
         }
+        const wasOff = ai.watch !== true;
         ai.watch = true;
-        ai.watchTtlMs = undefined;
-        ai.watchUntil = undefined;
         if (wasOff || !ai.watchStartedAt) {
           ai.watchStartedAt = new Date().toISOString();
         }
         aiStore.write(ai);
         await api.sendMessage({
           chat_id: chatId,
-          text: "Watching indefinitely — /watch off to stop.",
+          text: "Watching — /watch off to stop, /watch for status.",
         });
         return true;
       }
 
-      // Sliding TTL mode: /watch (default 60m) or /watch <duration>.
-      const ttl = token ? parseTtl(token) : DEFAULT_WATCH_TTL_MS;
-      if (ttl == null || ttl <= 0) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text:
-            "Usage: /watch [<duration> | on | off | status]\n" +
-            "Examples: /watch (60m), /watch 30m, /watch 2h, /watch on, /watch off",
-        });
-        return true;
-      }
-      const r = await sessionWatcher.start(ai, this.makeForwardFn(chatId));
-      if (!r.ok) {
-        await api.sendMessage({ chat_id: chatId, text: `Watch failed: ${r.error}` });
-        return true;
-      }
-      ai.watch = true;
-      ai.watchTtlMs = ttl;
-      if (wasOff || !ai.watchStartedAt) {
-        ai.watchStartedAt = new Date().toISOString();
-      }
-      slideWatch(ai);
       await api.sendMessage({
         chat_id: chatId,
-        text: `Watching with sliding ${formatTtl(ttl)} window — extends every time the session emits.`,
+        text: "Usage: /watch | /watch on | /watch off",
       });
       return true;
     }
@@ -1836,22 +1805,18 @@ export class TelegramChannel implements Channel {
     return (role, text) => {
       const prefix = role === "user" ? "👤" : "🤖";
       void this.send({ chatId }, { text: `${prefix} ${text}` });
-      // Forwarded entry counts as activity — slide the watch deadline so the
-      // watcher stays alive as long as the underlying session keeps producing,
-      // and record this as the latest message the bot put in chat so
-      // /watch status reflects the user's actual view.
-      void (async () => {
-        try {
-          const ai = aiStore.findByTelegramChat(chatId);
-          if (!ai) return;
+      // Record this as the latest message the bot put in chat so /watch
+      // status reflects the user's actual view.
+      try {
+        const ai = aiStore.findByTelegramChat(chatId);
+        if (ai) {
           ai.lastBotMessageAt = new Date().toISOString();
           ai.lastBotMessagePreview = `${prefix} ${text}`.slice(0, 240);
-          const { slideWatch } = await import("../ai-sessions/watch.js");
-          slideWatch(ai); // persists ai
-        } catch (e) {
-          console.error("[watch] slide-on-forward failed:", e);
+          aiStore.write(ai);
         }
-      })();
+      } catch (e) {
+        console.error("[watch] forward persist failed:", e);
+      }
     };
   }
 
@@ -2102,24 +2067,10 @@ export class TelegramChannel implements Channel {
         if (fresh) {
           fresh.lastBotMessageAt = new Date().toISOString();
           fresh.lastBotMessagePreview = finalText.slice(0, 240);
-          const { slideWatch, DEFAULT_WATCH_TTL_MS } = await import(
-            "../ai-sessions/watch.js"
-          );
-          if (fresh.watch === true) {
-            slideWatch(fresh); // also persists
-          } else if (fresh.watch === undefined) {
-            fresh.watch = true;
-            fresh.watchTtlMs = DEFAULT_WATCH_TTL_MS;
-            fresh.watchStartedAt = new Date().toISOString();
-            slideWatch(fresh); // persists
-            const startRes = await sessionWatcher.start(fresh, this.makeForwardFn(chatId));
-            if (!startRes.ok) console.error("[watch] auto-start failed:", startRes.error);
-          } else {
-            aiStore.write(fresh);
-          }
+          aiStore.write(fresh);
         }
       } catch (e) {
-        console.error("[watch] slide-on-completion failed:", e);
+        console.error("[watch] post-route persist failed:", e);
       }
     } catch (e: any) {
       console.error("[telegram] routeToSession error:", e?.stack ?? e?.message ?? e);

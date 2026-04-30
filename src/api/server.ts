@@ -72,7 +72,8 @@ export function createApp() {
   // Unified runs API.
   app.post("/providers/:provider/runs", async (req: Request, res: Response, next) => {
     try {
-      const { prompt, sessionId, aiSessionId, cwd, yolo } = req.body ?? {};
+      const { prompt, sessionId, aiSessionId, cwd, yolo, effort, attachments } =
+        req.body ?? {};
       if (!prompt) return res.status(400).json({ error: "prompt required" });
 
       const handle = getProvider(String(req.params.provider)).run({
@@ -81,6 +82,8 @@ export function createApp() {
         aiSessionId,
         cwd,
         yolo,
+        effort,
+        attachments,
       });
 
       const answerOnly = String(req.query.answerOnly ?? "") === "1";
@@ -96,17 +99,25 @@ export function createApp() {
         return;
       }
 
-      // SSE by default.
+      // SSE by default. Stop writing if the client disconnects so we don't
+      // throw "write after end" once the socket is gone.
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
+      let aborted = false;
+      req.on("close", () => {
+        aborted = true;
+      });
       res.write(`event: meta\ndata: ${JSON.stringify(handle.meta)}\n\n`);
       for await (const ev of handle.events) {
+        if (aborted) break;
         res.write(`data: ${JSON.stringify(ev)}\n\n`);
       }
       const final = await handle.done;
-      res.write(`event: done\ndata: ${JSON.stringify(final)}\n\n`);
-      res.end();
+      if (!aborted) {
+        res.write(`event: done\ndata: ${JSON.stringify(final)}\n\n`);
+        res.end();
+      }
     } catch (e) {
       next(e);
     }
@@ -264,7 +275,19 @@ export function createApp() {
   });
 
   app.use((err: any, _req: Request, res: Response, _next: express.NextFunction) => {
-    res.status(500).json({ error: err?.message ?? String(err) });
+    // Map well-known error messages to client-facing status codes so callers
+    // can distinguish "I asked for the wrong thing" from "the server broke".
+    // Keep the list small and message-prefix-based — adding a typed error
+    // hierarchy is overkill for this surface area today.
+    const msg: string = err?.message ?? String(err);
+    let status = 500;
+    if (/^unknown provider\b/i.test(msg)) status = 400;
+    else if (/^ai-session not found\b/i.test(msg)) status = 404;
+    else if (/^cron not found\b/i.test(msg)) status = 404;
+    else if (/^run not found\b/i.test(msg)) status = 404;
+    else if (/\bsession not found\b/i.test(msg)) status = 404;
+    else if (/\brequired\b/i.test(msg)) status = 400;
+    res.status(status).json({ error: msg });
   });
 
   return app;

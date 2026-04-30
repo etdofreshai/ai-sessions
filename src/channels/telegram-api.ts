@@ -87,19 +87,17 @@ export class TelegramApi {
 
   // Honor Telegram's flood-control. A 429 response carries
   // parameters.retry_after (seconds) in the body and Retry-After in the
-  // header. We sleep for that long and retry once; further failures bubble
-  // up so callers can decide what to do (log + give up, fall back to plain
-  // text, etc.). Two retries max so a wedged endpoint can't hold a route
-  // turn open indefinitely.
-  private async call<T = any>(method: string, body?: object): Promise<T> {
+  // header. We sleep for that long and retry; ≤2 retries so a wedged
+  // endpoint can't hold a route turn open indefinitely. Both JSON and
+  // multipart endpoints share this loop via callRaw().
+  private async callRaw<T>(
+    method: string,
+    buildInit: () => RequestInit,
+  ): Promise<T> {
     let attempt = 0;
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const res = await fetch(`${API_BASE}/bot${this.token}/${method}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: body ? JSON.stringify(body) : undefined,
-      });
+      const res = await fetch(`${API_BASE}/bot${this.token}/${method}`, buildInit());
       const json: any = await res.json();
       if (json.ok) return json.result as T;
       const retryAfter =
@@ -108,10 +106,7 @@ export class TelegramApi {
         0;
       if (res.status === 429 && retryAfter > 0 && attempt < 2) {
         attempt++;
-        // Cap a single sleep at 60s so we don't pin the route turn forever
-        // — Telegram occasionally returns very large retry_after values
-        // when a chat has been hammered. Better to surface the error than
-        // freeze the whole bot.
+        // Cap a single sleep at 60s so we don't pin the route turn forever.
         const delayMs = Math.min(retryAfter, 60) * 1000 + 250;
         console.error(
           `[telegram] 429 on ${method}; retrying in ${delayMs}ms (attempt ${attempt})`,
@@ -121,6 +116,14 @@ export class TelegramApi {
       }
       throw new Error(`telegram ${method} failed: ${json.description ?? JSON.stringify(json)}`);
     }
+  }
+
+  private call<T = any>(method: string, body?: object): Promise<T> {
+    return this.callRaw<T>(method, () => ({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    }));
   }
 
   getMe() {
@@ -189,58 +192,64 @@ export class TelegramApi {
     return this.call("setMyCommands", opts);
   }
 
-  async sendPhoto(opts: {
+  // Multipart upload helper — shared between sendPhoto / sendDocument so
+  // they both go through callRaw()'s 429 retry loop.
+  private async uploadFile(
+    method: "sendPhoto" | "sendDocument",
+    opts: {
+      chat_id: number;
+      filePartName: "photo" | "document";
+      file: { bytes: Buffer; filename: string; mimeType?: string };
+      defaultMimeType: string;
+      caption?: string;
+      message_thread_id?: number;
+    },
+  ): Promise<TgMessage> {
+    return this.callRaw<TgMessage>(method, () => {
+      const fd = new FormData();
+      fd.set("chat_id", String(opts.chat_id));
+      if (opts.caption) fd.set("caption", opts.caption);
+      if (opts.message_thread_id != null) {
+        fd.set("message_thread_id", String(opts.message_thread_id));
+      }
+      const blob = new Blob([new Uint8Array(opts.file.bytes)], {
+        type: opts.file.mimeType ?? opts.defaultMimeType,
+      });
+      fd.set(opts.filePartName, blob, opts.file.filename);
+      return { method: "POST", body: fd };
+    });
+  }
+
+  sendPhoto(opts: {
     chat_id: number;
     photo: { bytes: Buffer; filename: string; mimeType?: string };
     caption?: string;
     message_thread_id?: number;
   }): Promise<TgMessage> {
-    const fd = new FormData();
-    fd.set("chat_id", String(opts.chat_id));
-    if (opts.caption) fd.set("caption", opts.caption);
-    if (opts.message_thread_id != null) {
-      fd.set("message_thread_id", String(opts.message_thread_id));
-    }
-    const blob = new Blob([new Uint8Array(opts.photo.bytes)], {
-      type: opts.photo.mimeType ?? "image/png",
+    return this.uploadFile("sendPhoto", {
+      chat_id: opts.chat_id,
+      filePartName: "photo",
+      file: opts.photo,
+      defaultMimeType: "image/png",
+      caption: opts.caption,
+      message_thread_id: opts.message_thread_id,
     });
-    fd.set("photo", blob, opts.photo.filename);
-    const res = await fetch(`${API_BASE}/bot${this.token}/sendPhoto`, {
-      method: "POST",
-      body: fd,
-    });
-    const json: any = await res.json();
-    if (!json.ok) {
-      throw new Error(`telegram sendPhoto failed: ${json.description ?? JSON.stringify(json)}`);
-    }
-    return json.result as TgMessage;
   }
 
-  async sendDocument(opts: {
+  sendDocument(opts: {
     chat_id: number;
     file: { bytes: Buffer; filename: string; mimeType?: string };
     caption?: string;
     message_thread_id?: number;
   }): Promise<TgMessage> {
-    const fd = new FormData();
-    fd.set("chat_id", String(opts.chat_id));
-    if (opts.caption) fd.set("caption", opts.caption);
-    if (opts.message_thread_id != null) {
-      fd.set("message_thread_id", String(opts.message_thread_id));
-    }
-    const blob = new Blob([new Uint8Array(opts.file.bytes)], {
-      type: opts.file.mimeType ?? "application/octet-stream",
+    return this.uploadFile("sendDocument", {
+      chat_id: opts.chat_id,
+      filePartName: "document",
+      file: opts.file,
+      defaultMimeType: "application/octet-stream",
+      caption: opts.caption,
+      message_thread_id: opts.message_thread_id,
     });
-    fd.set("document", blob, opts.file.filename);
-    const res = await fetch(`${API_BASE}/bot${this.token}/sendDocument`, {
-      method: "POST",
-      body: fd,
-    });
-    const json: any = await res.json();
-    if (!json.ok) {
-      throw new Error(`telegram sendDocument failed: ${json.description ?? JSON.stringify(json)}`);
-    }
-    return json.result as TgMessage;
   }
 
   sendChatAction(opts: {

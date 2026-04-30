@@ -1009,27 +1009,50 @@ export class TelegramChannel implements Channel {
       const ai = aiStore.findByTelegramChat(chatId);
       const baseDir = ai?.cwd ?? workspaceDir();
       const path = isAbsolute(target) ? target : resolve(baseDir, target);
+      const { existsSync } = await import("node:fs");
+      if (!existsSync(path)) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Path:    ${path}\n(does not exist on this server's filesystem)`,
+        });
+        return true;
+      }
       const { execFileSync } = await import("node:child_process");
-      const tryGit = (args: string[]): string => {
+      const tryGit = (
+        args: string[],
+      ): { ok: boolean; out: string } => {
         try {
-          return execFileSync("git", ["-C", path, ...args], {
+          const out = execFileSync("git", ["-C", path, ...args], {
             encoding: "utf8",
             stdio: ["ignore", "pipe", "pipe"],
           }).trim();
+          return { ok: true, out };
         } catch (e: any) {
-          return `(error: ${e?.stderr?.toString().trim() || e?.message})`;
+          return {
+            ok: false,
+            out: (e?.stderr?.toString() || e?.message || "").trim(),
+          };
         }
       };
       const sha = tryGit(["rev-parse", "HEAD"]);
+      if (!sha.ok) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Path:    ${path}\n(${sha.out || "not a git repo"})`,
+        });
+        return true;
+      }
       const branch = tryGit(["rev-parse", "--abbrev-ref", "HEAD"]);
-      const status = tryGit(["status", "--porcelain"]);
       const remote = tryGit(["remote", "get-url", "origin"]);
+      const status = tryGit(["status", "--porcelain"]);
+      const dirtyCount =
+        status.ok && status.out ? status.out.split("\n").length : 0;
       const lines = [
         `Path:    ${path}`,
-        `Remote:  ${remote}`,
-        `Branch:  ${branch}`,
-        `Commit:  ${sha.slice(0, 7)} (${sha})`,
-        `Dirty:   ${status ? `yes (${status.split("\n").length} files)` : "no"}`,
+        `Remote:  ${remote.ok ? remote.out : "(none)"}`,
+        `Branch:  ${branch.ok ? branch.out : "(?)"}`,
+        `Commit:  ${sha.out.slice(0, 7)} (${sha.out})`,
+        `Dirty:   ${dirtyCount > 0 ? `yes (${dirtyCount} files)` : "no"}`,
       ];
       await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
       return true;

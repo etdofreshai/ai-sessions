@@ -20,9 +20,17 @@ export interface AiSession {
   // (and ultimately "low") when unset.
   reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   channels?: SessionChannelBindings;
-  // When true, mirror new entries from the provider session's transcript file
-  // into the bound channel(s). Off by default — opt-in via /watch.
+  // Mirror new entries from the provider session's transcript file into the
+  // bound channel(s). `true` = indefinite (no auto-expiry); a finite watch
+  // uses watchTtlMs + watchUntil for a sliding-window auto-stop. After every
+  // forwarded entry or completed run on this session, watchUntil is bumped
+  // forward by watchTtlMs.
   watch?: boolean;
+  // Sliding-window length in ms. When set, watchUntil is recomputed each
+  // time activity is seen; once watchUntil < now, the watcher self-stops.
+  watchTtlMs?: number;
+  // Absolute ISO timestamp at which the watcher should stop unless slid.
+  watchUntil?: string;
   createdAt: string;
   updatedAt: string;
 }

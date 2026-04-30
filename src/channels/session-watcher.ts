@@ -8,6 +8,8 @@ import {
 } from "node:fs";
 import { getProvider } from "../providers/index.js";
 import type { AiSession } from "../ai-sessions/types.js";
+import * as aiStore from "../ai-sessions/store.js";
+import { isExpired } from "../ai-sessions/watch.js";
 
 export type ForwardFn = (role: "user" | "assistant", text: string) => void;
 
@@ -177,6 +179,38 @@ export function mute(aiId: string): () => void {
     }
     e.partial = "";
   };
+}
+
+// Periodic sweep: stop watchers whose sliding deadline has passed and clear
+// the AiSession's TTL fields so a future /watch starts cleanly.
+let expiryTimer: NodeJS.Timeout | null = null;
+const EXPIRY_TICK_MS = 30_000;
+
+export function startExpiryTick(): void {
+  if (expiryTimer) return;
+  const run = (): void => {
+    for (const aiId of [...entries.keys()]) {
+      const ai = aiStore.read(aiId);
+      if (!ai) {
+        stop(aiId);
+        continue;
+      }
+      if (isExpired(ai)) {
+        stop(aiId);
+        ai.watchUntil = undefined;
+        ai.watchTtlMs = undefined;
+        ai.watch = false;
+        aiStore.write(ai);
+      }
+    }
+  };
+  expiryTimer = setInterval(run, EXPIRY_TICK_MS);
+  if (typeof expiryTimer.unref === "function") expiryTimer.unref();
+}
+
+export function stopExpiryTick(): void {
+  if (expiryTimer) clearInterval(expiryTimer);
+  expiryTimer = null;
 }
 
 export function stopAll(): void {

@@ -32,8 +32,8 @@ const SLASH_COMMANDS = [
   { command: "fork", description: "Fork the bound session to another provider: /fork <provider>" },
   { command: "remote", description: "Toggle claude remote-control: /remote [true|false]" },
   { command: "effort", description: "Set reasoning effort: /effort [low|medium|high|xhigh]" },
-  { command: "watch", description: "Mirror new entries from this claude session into the chat" },
-  { command: "unwatch", description: "Stop mirroring entries from this claude session" },
+  { command: "watch", description: "Mirror new session entries to chat: /watch [<duration>|on|off] (default 60m sliding)" },
+  { command: "unwatch", description: "Alias for /watch off" },
   { command: "cwd", description: "Show or set the bound session's cwd" },
   { command: "rename", description: "Rename the bound session (no arg = auto-summarize)" },
   { command: "skills", description: "List enabled skills in the workspace" },
@@ -183,6 +183,7 @@ export class TelegramChannel implements Channel {
     // Advertise slash commands in the bot menu. Best-effort — don't block start.
     remoteControl.installShutdownHook();
     this.restoreWatchers();
+    sessionWatcher.startExpiryTick();
     api
       .setMyCommands({ commands: SLASH_COMMANDS })
       .catch((e: any) => console.error("[telegram] setMyCommands failed:", e?.message ?? e));
@@ -652,16 +653,61 @@ export class TelegramChannel implements Channel {
         await api.sendMessage({ chat_id: chatId, text: "Not bound." });
         return true;
       }
+      const { parseTtl, formatTtl, slideWatch, DEFAULT_WATCH_TTL_MS } = await import(
+        "../ai-sessions/watch.js"
+      );
+      const token = arg.trim().toLowerCase();
+
+      if (token === "off") {
+        sessionWatcher.stop(ai.id);
+        ai.watch = false;
+        ai.watchTtlMs = undefined;
+        ai.watchUntil = undefined;
+        aiStore.write(ai);
+        await api.sendMessage({ chat_id: chatId, text: "Stopped watching." });
+        return true;
+      }
+
+      // Indefinite mode: /watch on. No sliding — runs until /watch off.
+      if (token === "on") {
+        const r = await sessionWatcher.start(ai, this.makeForwardFn(chatId));
+        if (!r.ok) {
+          await api.sendMessage({ chat_id: chatId, text: `Watch failed: ${r.error}` });
+          return true;
+        }
+        ai.watch = true;
+        ai.watchTtlMs = undefined;
+        ai.watchUntil = undefined;
+        aiStore.write(ai);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: "Watching indefinitely — /watch off to stop.",
+        });
+        return true;
+      }
+
+      // Sliding TTL mode: /watch (default 60m) or /watch <duration>.
+      const ttl = token ? parseTtl(token) : DEFAULT_WATCH_TTL_MS;
+      if (ttl == null || ttl <= 0) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text:
+            "Usage: /watch [<duration> | on | off]\n" +
+            "Examples: /watch (60m), /watch 30m, /watch 2h, /watch on, /watch off",
+        });
+        return true;
+      }
       const r = await sessionWatcher.start(ai, this.makeForwardFn(chatId));
       if (!r.ok) {
         await api.sendMessage({ chat_id: chatId, text: `Watch failed: ${r.error}` });
         return true;
       }
       ai.watch = true;
-      aiStore.write(ai);
+      ai.watchTtlMs = ttl;
+      slideWatch(ai);
       await api.sendMessage({
         chat_id: chatId,
-        text: "Watching this session — new entries will mirror here.",
+        text: `Watching with sliding ${formatTtl(ttl)} window — extends every time the session emits.`,
       });
       return true;
     }
@@ -674,6 +720,8 @@ export class TelegramChannel implements Channel {
       }
       sessionWatcher.stop(ai.id);
       ai.watch = false;
+      ai.watchTtlMs = undefined;
+      ai.watchUntil = undefined;
       aiStore.write(ai);
       await api.sendMessage({ chat_id: chatId, text: "Stopped watching." });
       return true;
@@ -1573,6 +1621,18 @@ export class TelegramChannel implements Channel {
     return (role, text) => {
       const prefix = role === "user" ? "👤" : "🤖";
       void this.send({ chatId }, { text: `${prefix} ${text}` });
+      // Forwarded entry counts as activity — slide the watch deadline so the
+      // watcher stays alive as long as the underlying session keeps producing.
+      void (async () => {
+        try {
+          const ai = aiStore.findByTelegramChat(chatId);
+          if (!ai) return;
+          const { slideWatch } = await import("../ai-sessions/watch.js");
+          slideWatch(ai);
+        } catch (e) {
+          console.error("[watch] slide-on-forward failed:", e);
+        }
+      })();
     };
   }
 
@@ -1806,6 +1866,29 @@ export class TelegramChannel implements Channel {
         console.error("[telegram] image-path scan failed:", e);
       }
       await status.finalize(finalText);
+      // Activity on this session — slide the watch deadline if a sliding-TTL
+      // watch is configured. Default-on logic also lives here: chats whose
+      // session has no explicit watch state get auto-enabled with the default
+      // TTL on the first response, so users don't have to /watch by hand.
+      try {
+        const fresh = aiStore.read(ai.id);
+        if (fresh) {
+          const { slideWatch, DEFAULT_WATCH_TTL_MS } = await import(
+            "../ai-sessions/watch.js"
+          );
+          if (fresh.watch === true) {
+            slideWatch(fresh);
+          } else if (fresh.watch === undefined) {
+            fresh.watch = true;
+            fresh.watchTtlMs = DEFAULT_WATCH_TTL_MS;
+            slideWatch(fresh);
+            const startRes = await sessionWatcher.start(fresh, this.makeForwardFn(chatId));
+            if (!startRes.ok) console.error("[watch] auto-start failed:", startRes.error);
+          }
+        }
+      } catch (e) {
+        console.error("[watch] slide-on-completion failed:", e);
+      }
     } catch (e: any) {
       console.error("[telegram] routeToSession error:", e?.stack ?? e?.message ?? e);
       trace.finalText = `Error: ${e?.message ?? e}`;

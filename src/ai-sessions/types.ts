@@ -31,6 +31,15 @@ export interface AiSession {
   watchTtlMs?: number;
   // Absolute ISO timestamp at which the watcher should stop unless slid.
   watchUntil?: string;
+  // ISO timestamp of when the current watch was started (or last toggled
+  // back on). Used by /watch status to show "Started: X (Y ago)".
+  watchStartedAt?: string;
+  // Last assistant message we sent to the bound channel for this session,
+  // regardless of source (routeToSession final reply OR session-watcher
+  // forward). /watch status reads from this so users see the actual most
+  // recent bot post, not just the last watcher-forwarded entry.
+  lastBotMessageAt?: string;
+  lastBotMessagePreview?: string;
   createdAt: string;
   updatedAt: string;
 }

@@ -671,10 +671,13 @@ export class TelegramChannel implements Channel {
         ai.watch = false;
         ai.watchTtlMs = undefined;
         ai.watchUntil = undefined;
+        ai.watchStartedAt = undefined;
         aiStore.write(ai);
         await api.sendMessage({ chat_id: chatId, text: "Stopped watching." });
         return true;
       }
+
+      const wasOff = ai.watch !== true;
 
       // Indefinite mode: /watch on. No sliding — runs until /watch off.
       if (token === "on") {
@@ -686,6 +689,9 @@ export class TelegramChannel implements Channel {
         ai.watch = true;
         ai.watchTtlMs = undefined;
         ai.watchUntil = undefined;
+        if (wasOff || !ai.watchStartedAt) {
+          ai.watchStartedAt = new Date().toISOString();
+        }
         aiStore.write(ai);
         await api.sendMessage({
           chat_id: chatId,
@@ -700,7 +706,7 @@ export class TelegramChannel implements Channel {
         await api.sendMessage({
           chat_id: chatId,
           text:
-            "Usage: /watch [<duration> | on | off]\n" +
+            "Usage: /watch [<duration> | on | off | status]\n" +
             "Examples: /watch (60m), /watch 30m, /watch 2h, /watch on, /watch off",
         });
         return true;
@@ -712,6 +718,9 @@ export class TelegramChannel implements Channel {
       }
       ai.watch = true;
       ai.watchTtlMs = ttl;
+      if (wasOff || !ai.watchStartedAt) {
+        ai.watchStartedAt = new Date().toISOString();
+      }
       slideWatch(ai);
       await api.sendMessage({
         chat_id: chatId,
@@ -730,6 +739,7 @@ export class TelegramChannel implements Channel {
       ai.watch = false;
       ai.watchTtlMs = undefined;
       ai.watchUntil = undefined;
+      ai.watchStartedAt = undefined;
       aiStore.write(ai);
       await api.sendMessage({ chat_id: chatId, text: "Stopped watching." });
       return true;
@@ -1759,37 +1769,39 @@ export class TelegramChannel implements Channel {
     const { formatTtl } = await import("../ai-sessions/watch.js");
     const lines: string[] = [];
 
-    // Mode + expiry from the persisted AiSession.
+    // Mode + lifecycle from the persisted AiSession.
     let mode = "off";
     if (ai.watch === true) {
       mode = ai.watchTtlMs ? `sliding ${formatTtl(ai.watchTtlMs)}` : "indefinite";
     }
     lines.push(`Mode:     ${mode}`);
 
+    if (ai.watchStartedAt) {
+      const ms = Date.now() - new Date(ai.watchStartedAt).getTime();
+      lines.push(`Started:  ${ai.watchStartedAt} (${formatTtl(ms)} ago)`);
+    }
+
     if (ai.watchUntil) {
       const until = new Date(ai.watchUntil);
       const ms = until.getTime() - Date.now();
-      const rel =
-        ms > 0
-          ? `in ${formatTtl(ms)}`
-          : `expired ${formatTtl(-ms)} ago`;
+      const rel = ms > 0 ? `in ${formatTtl(ms)}` : `expired ${formatTtl(-ms)} ago`;
       lines.push(`Expires:  ${rel} (${ai.watchUntil})`);
     } else if (ai.watch === true) {
-      lines.push(`Expires:  n/a (no TTL)`);
+      lines.push(`Expires:  n/a (no TTL — runs until /watch off)`);
     }
 
     // Live watcher state.
     const status = sessionWatcher.getStatus(ai.id);
     if (!status) {
       lines.push("Running:  no (no in-process watcher)");
-      return lines.join("\n");
+    } else {
+      lines.push(`Running:  yes${status.muted ? " (muted — route turn in flight)" : ""}`);
+      lines.push(
+        `Lag:      ${
+          status.caughtUp ? "0 bytes (caught up)" : `${status.lagBytes} bytes behind`
+        }`,
+      );
     }
-    lines.push(`Running:  yes${status.muted ? " (muted)" : ""}`);
-    lines.push(
-      `Lag:      ${
-        status.caughtUp ? "0 bytes (caught up)" : `${status.lagBytes} bytes behind`
-      }`,
-    );
 
     const preview = (s: string): string => {
       const oneLine = s.replace(/\s+/g, " ").trim();
@@ -1797,32 +1809,26 @@ export class TelegramChannel implements Channel {
     };
 
     lines.push("");
-    lines.push("Last forwarded to Telegram:");
-    if (status.lastForwardedAt) {
-      const role = status.lastForwardedRole === "user" ? "👤" : "🤖";
-      lines.push(`  ${role}  ${new Date(status.lastForwardedAt).toISOString()}`);
-      lines.push(`      "${preview(status.lastForwardedPreview)}"`);
+    lines.push("Last sent to Telegram:");
+    if (ai.lastBotMessageAt && ai.lastBotMessagePreview) {
+      lines.push(`  ${ai.lastBotMessageAt}`);
+      lines.push(`    "${preview(ai.lastBotMessagePreview)}"`);
     } else {
-      lines.push("  (nothing forwarded yet this watcher)");
+      lines.push("  (nothing tracked yet — only set on route turns / forwards since the last redeploy)");
     }
 
     lines.push("");
     lines.push("Last entry on disk:");
-    const tail = sessionWatcher.readLatestEntry(status.path);
+    const tail = status ? sessionWatcher.readLatestEntry(status.path) : null;
     if (tail) {
       const role = tail.role === "user" ? "👤" : "🤖";
       lines.push(`  ${role}  ${tail.timestamp ?? "(no timestamp)"}`);
-      lines.push(`      "${preview(tail.preview)}"`);
-    } else {
+      lines.push(`    "${preview(tail.preview)}"`);
+    } else if (status) {
       lines.push("  (no parseable user/assistant entry)");
+    } else {
+      lines.push("  (watcher not running — can't tail)");
     }
-
-    lines.push("");
-    const upToDate =
-      status.caughtUp &&
-      tail !== null &&
-      status.lastForwardedPreview === tail.preview;
-    lines.push(`Up to date: ${upToDate}`);
     return lines.join("\n");
   }
 
@@ -1831,13 +1837,17 @@ export class TelegramChannel implements Channel {
       const prefix = role === "user" ? "👤" : "🤖";
       void this.send({ chatId }, { text: `${prefix} ${text}` });
       // Forwarded entry counts as activity — slide the watch deadline so the
-      // watcher stays alive as long as the underlying session keeps producing.
+      // watcher stays alive as long as the underlying session keeps producing,
+      // and record this as the latest message the bot put in chat so
+      // /watch status reflects the user's actual view.
       void (async () => {
         try {
           const ai = aiStore.findByTelegramChat(chatId);
           if (!ai) return;
+          ai.lastBotMessageAt = new Date().toISOString();
+          ai.lastBotMessagePreview = `${prefix} ${text}`.slice(0, 240);
           const { slideWatch } = await import("../ai-sessions/watch.js");
-          slideWatch(ai);
+          slideWatch(ai); // persists ai
         } catch (e) {
           console.error("[watch] slide-on-forward failed:", e);
         }
@@ -2081,24 +2091,31 @@ export class TelegramChannel implements Channel {
         console.error("[telegram] image-path scan failed:", e);
       }
       await status.finalize(finalText);
-      // Activity on this session — slide the watch deadline if a sliding-TTL
-      // watch is configured. Default-on logic also lives here: chats whose
-      // session has no explicit watch state get auto-enabled with the default
-      // TTL on the first response, so users don't have to /watch by hand.
+      // Activity on this session — record what we sent so /watch status shows
+      // the actual most recent bot post (route OR watcher), and slide the
+      // watch deadline if a sliding-TTL watch is configured. Default-on
+      // logic also lives here: chats whose session has no explicit watch
+      // state get auto-enabled with the default TTL on the first response,
+      // so users don't have to /watch by hand.
       try {
         const fresh = aiStore.read(ai.id);
         if (fresh) {
+          fresh.lastBotMessageAt = new Date().toISOString();
+          fresh.lastBotMessagePreview = finalText.slice(0, 240);
           const { slideWatch, DEFAULT_WATCH_TTL_MS } = await import(
             "../ai-sessions/watch.js"
           );
           if (fresh.watch === true) {
-            slideWatch(fresh);
+            slideWatch(fresh); // also persists
           } else if (fresh.watch === undefined) {
             fresh.watch = true;
             fresh.watchTtlMs = DEFAULT_WATCH_TTL_MS;
-            slideWatch(fresh);
+            fresh.watchStartedAt = new Date().toISOString();
+            slideWatch(fresh); // persists
             const startRes = await sessionWatcher.start(fresh, this.makeForwardFn(chatId));
             if (!startRes.ok) console.error("[watch] auto-start failed:", startRes.error);
+          } else {
+            aiStore.write(fresh);
           }
         }
       } catch (e) {

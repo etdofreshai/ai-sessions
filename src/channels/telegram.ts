@@ -44,7 +44,7 @@ const SLASH_COMMANDS = [
   { command: "btw", description: "Side question with full chat context, doesn't touch the bound session" },
   { command: "usage", description: "Show rate-limit usage across providers (5h / weekly windows)" },
   { command: "cron", description: "Manage scheduled prompts on this chat: /cron add|ls|rm" },
-  { command: "sha", description: "Show the running server's git commit (so you can tell if it's the latest)" },
+  { command: "sha", description: "Show server's git commit, or git status of a path: /sha [<relative-or-absolute-dir>]" },
 ];
 
 interface PendingBinding {
@@ -990,13 +990,48 @@ export class TelegramChannel implements Channel {
     }
 
     if (cmd === "/sha") {
-      const { GIT, VERSION } = await import("../version.js");
-      const text = [
-        `Version: ${VERSION}`,
-        `Branch:  ${GIT.branch}`,
-        `Commit:  ${GIT.shortSha} (${GIT.sha})`,
-      ].join("\n");
-      await api.sendMessage({ chat_id: chatId, text });
+      const target = arg.trim();
+      // No arg → server build SHA from baked env / runtime detection.
+      if (!target) {
+        const { GIT, VERSION } = await import("../version.js");
+        const text = [
+          `Version: ${VERSION}`,
+          `Branch:  ${GIT.branch}`,
+          `Commit:  ${GIT.shortSha} (${GIT.sha})`,
+        ].join("\n");
+        await api.sendMessage({ chat_id: chatId, text });
+        return true;
+      }
+      // Arg → run `git -C <path>` and report. Resolve relative paths against
+      // the bound AiSession's cwd if any, otherwise the workspace dir.
+      const { resolve, isAbsolute } = await import("node:path");
+      const { workspaceDir } = await import("../config.js");
+      const ai = aiStore.findByTelegramChat(chatId);
+      const baseDir = ai?.cwd ?? workspaceDir();
+      const path = isAbsolute(target) ? target : resolve(baseDir, target);
+      const { execFileSync } = await import("node:child_process");
+      const tryGit = (args: string[]): string => {
+        try {
+          return execFileSync("git", ["-C", path, ...args], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          }).trim();
+        } catch (e: any) {
+          return `(error: ${e?.stderr?.toString().trim() || e?.message})`;
+        }
+      };
+      const sha = tryGit(["rev-parse", "HEAD"]);
+      const branch = tryGit(["rev-parse", "--abbrev-ref", "HEAD"]);
+      const status = tryGit(["status", "--porcelain"]);
+      const remote = tryGit(["remote", "get-url", "origin"]);
+      const lines = [
+        `Path:    ${path}`,
+        `Remote:  ${remote}`,
+        `Branch:  ${branch}`,
+        `Commit:  ${sha.slice(0, 7)} (${sha})`,
+        `Dirty:   ${status ? `yes (${status.split("\n").length} files)` : "no"}`,
+      ];
+      await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
       return true;
     }
 

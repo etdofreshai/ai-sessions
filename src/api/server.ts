@@ -20,6 +20,7 @@ import * as cronStore from "../crons/store.js";
 import { makeJob, nextFireAfter } from "../crons/scheduler.js";
 import { getUsage } from "../usage/index.js";
 import { VERSION, GIT } from "../version.js";
+import * as hookStore from "../hooks/store.js";
 
 export function createApp() {
   const app = express();
@@ -272,6 +273,44 @@ export function createApp() {
     } catch (e) {
       next(e);
     }
+  });
+
+  // Hook ingest from inner harnesses (Claude Code / Codex). The harness
+  // POSTs the same JSON body it would normally pass to a hook command.
+  // We persist it for inspection and return the standard "continue" hook
+  // response so the harness keeps running. Acting on specific events
+  // (block dangerous tool calls, forward to Telegram, capture bg-task
+  // launches) layers on top of this in subsequent steps.
+  function recordHook(harness: "claude" | "codex") {
+    return (req: Request, res: Response) => {
+      try {
+        const payload = (req.body ?? {}) as Record<string, unknown>;
+        const ev = hookStore.record({ harness, payload });
+        console.error(
+          `[hooks/${harness}] ${ev.eventName}` +
+            (ev.toolName ? ` ${ev.toolName}` : "") +
+            (ev.sessionId ? ` session=${ev.sessionId.slice(0, 8)}` : ""),
+        );
+        res.json({ continue: true });
+      } catch (e: any) {
+        console.error(`[hooks/${harness}] persist failed:`, e?.message ?? e);
+        // Don't block the harness on our persistence failure — degrade open.
+        res.json({ continue: true });
+      }
+    };
+  }
+
+  app.post("/hooks/claude", recordHook("claude"));
+  app.post("/hooks/codex", recordHook("codex"));
+
+  app.get("/hooks", (req, res) => {
+    const sessionId = (req.query.session_id as string | undefined) ?? undefined;
+    const limit = Math.min(Number(req.query.limit ?? 200), 1000) || 200;
+    res.json(
+      sessionId
+        ? hookStore.listForSession(sessionId, limit)
+        : hookStore.listRecent(limit),
+    );
   });
 
   app.use((err: any, _req: Request, res: Response, _next: express.NextFunction) => {

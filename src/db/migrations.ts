@@ -82,4 +82,25 @@ export const migrations: string[] = [
     FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
   );
   `,
+
+  // 2. hook_events — append-only log of every hook callback received from
+  // an inner harness (Claude Code / Codex). Indexed by harness session_id
+  // so we can read all events for a turn back without scanning the table.
+  // payload_json is the entire body the harness sent us; we don't normalize
+  // per-event fields because the schema differs by event_name and we want
+  // to be able to add new event types without migrations.
+  `
+  CREATE TABLE hook_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at   TEXT NOT NULL,
+    harness       TEXT NOT NULL,        -- 'claude' | 'codex'
+    event_name    TEXT NOT NULL,        -- PreToolUse, PostToolUse, Stop, ...
+    session_id    TEXT,                 -- inner harness session id
+    ai_session_id TEXT,                 -- our wrapper, if resolvable
+    tool_name     TEXT,                 -- handy for filtering tool events
+    payload_json  TEXT NOT NULL
+  );
+  CREATE INDEX hook_events_session ON hook_events(session_id, received_at);
+  CREATE INDEX hook_events_received ON hook_events(received_at DESC);
+  `,
 ];

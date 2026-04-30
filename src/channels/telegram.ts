@@ -1780,6 +1780,12 @@ export class TelegramChannel implements Channel {
             const inputStr = formatToolInput(ev.input);
             status.push(`🔧 ${ev.name}${inputStr ? `: ${inputStr}` : ""}`);
             trace.events.push({ ts: Date.now(), type: "tool_use", name: ev.name, input: ev.input });
+          } else if (ev.type === "text") {
+            // Stream model text into the status bubble so the user sees
+            // intermediate narration (e.g. "Let me check…") as it arrives,
+            // not all at once at end-of-turn. The final `finalize()` swaps
+            // the bubble with the clean final response.
+            status.appendText(ev.text);
           } else if (ev.type === "tool_result") {
             // Mark previous tool line as complete; light touch.
             status.markLastDone();
@@ -1904,16 +1910,22 @@ export class TelegramChannel implements Channel {
   // batches edits (≥1.5s apart) and supports a final replacement.
   private async openStatusBlock(chatId: number): Promise<{
     push: (line: string) => void;
+    appendText: (chunk: string) => void;
     markLastDone: () => void;
     finalize: (text: string) => Promise<void>;
   }> {
     const api = this.api!;
     let messageId: number | null = null;
     const lines: string[] = ["🤔 thinking…"];
+    // Index of the in-progress "💬 …" text line within `lines`, if any.
+    // Subsequent text chunks append into that slot; any non-text push freezes
+    // it (sets to null) so the next text chunk starts a fresh line.
+    let currentTextIdx: number | null = null;
     let lastEditAt = 0;
     let pending: NodeJS.Timeout | null = null;
     const MIN_INTERVAL = 1500;
     const MAX_LINES = 12;
+    const TEXT_LINE_MAX = 800;
 
     const render = () => lines.join("\n").slice(0, 4000) || "🤔 thinking…";
 
@@ -1948,12 +1960,46 @@ export class TelegramChannel implements Channel {
       }, wait);
     };
 
+    const dropPlaceholder = (): void => {
+      if (lines.length === 1 && lines[0] === "🤔 thinking…") lines.length = 0;
+    };
+
+    const trimLines = (): void => {
+      if (lines.length <= MAX_LINES) return;
+      const dropCount = lines.length - MAX_LINES;
+      lines.splice(0, dropCount);
+      if (currentTextIdx != null) {
+        currentTextIdx -= dropCount;
+        if (currentTextIdx < 0) currentTextIdx = null;
+      }
+    };
+
     return {
       push: (line: string) => {
-        // Drop the initial placeholder once real activity arrives.
-        if (lines.length === 1 && lines[0] === "🤔 thinking…") lines.length = 0;
+        dropPlaceholder();
+        // Any non-text line ends the current streaming text block, so the
+        // next text chunk starts in its own bubble line.
+        currentTextIdx = null;
         lines.push(line);
-        if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
+        trimLines();
+        schedule();
+      },
+      appendText: (chunk: string) => {
+        if (!chunk) return;
+        dropPlaceholder();
+        if (currentTextIdx == null) {
+          lines.push(`💬 ${chunk}`);
+          currentTextIdx = lines.length - 1;
+        } else {
+          let cur = lines[currentTextIdx] + chunk;
+          // Keep the live preview compact — long replies still appear in full
+          // when finalize() swaps in the final response.
+          if (cur.length > TEXT_LINE_MAX + 2) {
+            cur = "💬 …" + cur.slice(-TEXT_LINE_MAX);
+          }
+          lines[currentTextIdx] = cur;
+        }
+        trimLines();
         schedule();
       },
       markLastDone: () => {

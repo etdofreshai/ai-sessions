@@ -70,13 +70,28 @@ RUN set -eux \
 WORKDIR /app
 RUN chown node:node /app
 
-# Build-time identification: pass --build-arg GIT_SHA=$(git rev-parse HEAD)
-# (and optional GIT_BRANCH) so the running server can report the exact build
-# via GET / and /sha. Falls back gracefully when unset.
+# Bake the build's git commit into /app/BUILD_SHA so /sha can report it
+# without needing --build-arg or runtime git access. Copies the source
+# tree's .git into a scratch dir, runs rev-parse, then deletes it — the
+# final image only carries the resulting BUILD_SHA / BUILD_BRANCH text
+# files (and stays slim). The optional --build-arg GIT_SHA path still
+# works as an override.
 ARG GIT_SHA=""
 ARG GIT_BRANCH=""
-ENV AI_SESSIONS_GIT_SHA=${GIT_SHA} \
-    AI_SESSIONS_GIT_BRANCH=${GIT_BRANCH}
+COPY .git /tmp/buildgit/.git
+RUN set -eux; \
+    if [ -n "${GIT_SHA}" ]; then \
+        echo "${GIT_SHA}" > /app/BUILD_SHA; \
+        echo "${GIT_BRANCH:-(env)}" > /app/BUILD_BRANCH; \
+    elif [ -d /tmp/buildgit/.git ]; then \
+        git --git-dir=/tmp/buildgit/.git rev-parse HEAD > /app/BUILD_SHA; \
+        git --git-dir=/tmp/buildgit/.git rev-parse --abbrev-ref HEAD > /app/BUILD_BRANCH; \
+    else \
+        echo "(unknown)" > /app/BUILD_SHA; \
+        echo "(unknown)" > /app/BUILD_BRANCH; \
+    fi; \
+    rm -rf /tmp/buildgit; \
+    chown node:node /app/BUILD_SHA /app/BUILD_BRANCH
 
 USER node
 

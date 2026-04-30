@@ -9,10 +9,14 @@ sessions
 uploads
 workspace
 
-.git
 .gitignore
 .dockerignore
 Dockerfile
+
+# .git is intentionally NOT ignored — the Dockerfile copies it briefly
+# during build to bake BUILD_SHA into the image, then removes it so the
+# final image stays slim. Ignoring it would force every deployer to
+# remember --build-arg GIT_SHA, which is fragile.
 
 *.log
 .DS_Store

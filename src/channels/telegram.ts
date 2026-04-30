@@ -2149,7 +2149,14 @@ export class TelegramChannel implements Channel {
       } catch (e) {
         console.error("[telegram] image-path scan failed:", e);
       }
-      await status.finalize(finalText);
+      // Don't let a transient send failure (e.g. Telegram 429 after the
+      // built-in retries are exhausted) crash the whole route turn — the
+      // run already succeeded, we just couldn't post the final bubble.
+      try {
+        await status.finalize(finalText);
+      } catch (e: any) {
+        console.error("[telegram] finalize failed:", e?.message ?? e);
+      }
       // Activity on this session — record what we sent so /watch status shows
       // the actual most recent bot post (route OR watcher), and slide the
       // watch deadline if a sliding-TTL watch is configured. Default-on

@@ -85,17 +85,42 @@ export interface InlineKeyboardMarkup {
 export class TelegramApi {
   constructor(private token: string) {}
 
+  // Honor Telegram's flood-control. A 429 response carries
+  // parameters.retry_after (seconds) in the body and Retry-After in the
+  // header. We sleep for that long and retry once; further failures bubble
+  // up so callers can decide what to do (log + give up, fall back to plain
+  // text, etc.). Two retries max so a wedged endpoint can't hold a route
+  // turn open indefinitely.
   private async call<T = any>(method: string, body?: object): Promise<T> {
-    const res = await fetch(`${API_BASE}/bot${this.token}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const json: any = await res.json();
-    if (!json.ok) {
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const res = await fetch(`${API_BASE}/bot${this.token}/${method}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const json: any = await res.json();
+      if (json.ok) return json.result as T;
+      const retryAfter =
+        Number(json?.parameters?.retry_after) ||
+        Number(res.headers.get("retry-after")) ||
+        0;
+      if (res.status === 429 && retryAfter > 0 && attempt < 2) {
+        attempt++;
+        // Cap a single sleep at 60s so we don't pin the route turn forever
+        // — Telegram occasionally returns very large retry_after values
+        // when a chat has been hammered. Better to surface the error than
+        // freeze the whole bot.
+        const delayMs = Math.min(retryAfter, 60) * 1000 + 250;
+        console.error(
+          `[telegram] 429 on ${method}; retrying in ${delayMs}ms (attempt ${attempt})`,
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
       throw new Error(`telegram ${method} failed: ${json.description ?? JSON.stringify(json)}`);
     }
-    return json.result as T;
   }
 
   getMe() {

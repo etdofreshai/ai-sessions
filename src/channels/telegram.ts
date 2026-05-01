@@ -2323,6 +2323,34 @@ export class TelegramChannel implements Channel {
       await this.send({ chatId }, { text });
     });
   }
+
+  // Public façade used by sub-agents/runner.ts when it needs its own
+  // throttled-edit bubble. Same factory as the private route-turn one;
+  // exposed here so runners outside this module don't have to know about
+  // the api / sendMessage plumbing.
+  openSubAgentBubble(chatId: number) {
+    return openStatusBlock(this.api!, chatId, async (text) => {
+      await this.send({ chatId }, { text });
+    });
+  }
+
+  // Public photo sender — also routed through the same TelegramApi so the
+  // 429 retry / multipart logic applies. Exposed so the sub-agent runner
+  // can render image events without importing TelegramApi directly.
+  async sendPhotoToChat(opts: {
+    chatId: number;
+    bytes: Buffer;
+    filename: string;
+    mimeType?: string;
+    threadId?: number;
+  }): Promise<void> {
+    if (!this.api) return;
+    await this.api.sendPhoto({
+      chat_id: opts.chatId,
+      photo: { bytes: opts.bytes, filename: opts.filename, mimeType: opts.mimeType },
+      message_thread_id: opts.threadId,
+    });
+  }
 }
 
 export const telegramChannel = new TelegramChannel();

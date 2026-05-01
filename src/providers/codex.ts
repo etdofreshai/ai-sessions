@@ -7,6 +7,7 @@ import { planAiSessionResolution } from "../ai-sessions/finalize.js";
 import { buildCatalog } from "../skills/catalog.js";
 import { outstandingJobsSection } from "../jobs/prompt-section.js";
 import { loadDotenv } from "../sessions/dotenv.js";
+import { sanitizeSubprocessEnv } from "./env-sanitize.js";
 import type { RunHandle } from "../runs/types.js";
 import type {
   Provider,
@@ -125,7 +126,7 @@ export const codexProvider: Provider = {
         if (opts.effort) configOverrides.model_reasoning_effort = opts.effort;
         const client = new CodexAppServer({
           cwd: effectiveCwd,
-          env: { ...process.env, ...workspaceEnv },
+          env: { ...sanitizeSubprocessEnv(), ...workspaceEnv },
           configOverrides,
         });
         try {

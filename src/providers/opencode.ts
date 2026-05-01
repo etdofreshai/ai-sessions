@@ -6,6 +6,7 @@ import fg from "fast-glob";
 import { startRun } from "../runs/start.js";
 import { planAiSessionResolution } from "../ai-sessions/finalize.js";
 import { loadDotenv } from "../sessions/dotenv.js";
+import { sanitizeSubprocessEnv } from "./env-sanitize.js";
 import type { RunHandle } from "../runs/types.js";
 import type {
   Provider,
@@ -112,7 +113,7 @@ export const opencodeProvider: Provider = {
           const workspaceEnv = loadDotenv(effectiveCwd);
           const child = spawn("opencode", args, {
             cwd: effectiveCwd,
-            env: { ...process.env, ...workspaceEnv },
+            env: { ...sanitizeSubprocessEnv(), ...workspaceEnv },
             stdio: ["ignore", "pipe", "pipe"],
             shell: process.platform === "win32",
           });

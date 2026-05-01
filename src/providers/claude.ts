@@ -7,6 +7,7 @@ import { planAiSessionResolution } from "../ai-sessions/finalize.js";
 import { buildCatalog } from "../skills/catalog.js";
 import { outstandingJobsSection } from "../jobs/prompt-section.js";
 import { loadDotenv } from "../sessions/dotenv.js";
+import { sanitizeSubprocessEnv } from "./env-sanitize.js";
 import type { RunHandle } from "../runs/types.js";
 import type {
   Provider,
@@ -230,7 +231,7 @@ export function makeClaudeFlavoredProvider(cfg: ClaudeFlavorConfig): Provider {
           options: {
             cwd: effectiveCwd,
             env: {
-              ...(process.env as Record<string, string>),
+              ...sanitizeSubprocessEnv(),
               ...workspaceEnv,
               ...flavorEnv,
             },

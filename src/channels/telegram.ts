@@ -185,6 +185,10 @@ export class TelegramChannel implements Channel {
     api
       .setMyCommands({ commands: SLASH_COMMANDS })
       .catch((e: any) => console.error("[telegram] setMyCommands failed:", e?.message ?? e));
+    if (process.env.AI_SESSIONS_DISABLE_POLLING === "1") {
+      console.log("[telegram] AI_SESSIONS_DISABLE_POLLING=1 — sending only, not polling");
+      return;
+    }
     this.polling = true;
     void this.pollLoop();
   }
@@ -222,6 +226,11 @@ export class TelegramChannel implements Channel {
   }
 
   private async pollLoop(): Promise<void> {
+    // 409 ("Conflict: terminated by other getUpdates request") happens when
+    // another instance is polling the same bot token. Log once on the first
+    // hit and stay quiet until polling recovers — otherwise the loop spams
+    // the same line every 2s indefinitely.
+    let conflictLogged = false;
     while (this.polling && this.api) {
       try {
         const updates = await this.api.getUpdates({
@@ -229,6 +238,10 @@ export class TelegramChannel implements Channel {
           timeout: 25,
           allowed_updates: ["message", "callback_query"],
         });
+        if (conflictLogged) {
+          console.log("[telegram] poll recovered (no longer competing for getUpdates)");
+          conflictLogged = false;
+        }
         for (const u of updates) {
           this.offset = u.update_id + 1;
           await this.handleUpdate(u).catch((e) => {
@@ -236,8 +249,22 @@ export class TelegramChannel implements Channel {
           });
         }
       } catch (e: any) {
-        console.error("[telegram] poll error:", e?.message ?? e);
-        await sleep(2000);
+        const msg = e?.message ?? String(e);
+        const isConflict = /Conflict:\s*terminated by other getUpdates/i.test(msg);
+        if (isConflict) {
+          if (!conflictLogged) {
+            console.error(
+              "[telegram] poll conflict — another process is polling the same bot token. " +
+                "Set AI_SESSIONS_DISABLE_POLLING=1 on this instance, or use a different " +
+                "TELEGRAM_BOT_TOKEN. Backing off; will not log again until recovered.",
+            );
+            conflictLogged = true;
+          }
+          await sleep(15_000);
+        } else {
+          console.error("[telegram] poll error:", msg);
+          await sleep(2000);
+        }
       }
     }
   }

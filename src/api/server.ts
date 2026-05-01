@@ -310,6 +310,105 @@ export function createApp() {
   app.post("/hooks/claude", recordHook("claude"));
   app.post("/hooks/codex", recordHook("codex"));
 
+  // Long-running jobs — HTTP equivalents of the `ais jobs` CLI so an agent
+  // running inside a container that doesn't have the CLI on PATH can drive
+  // the queue via curl. Worker still lives inside `ais serve`.
+  app.post("/jobs", async (req, res, next) => {
+    try {
+      const jobsStore = await import("../jobs/store.js");
+      const { kind, payload, label, aiSessionId, chatId } = req.body ?? {};
+      if (kind !== "bash") {
+        return res.status(400).json({ error: "unknown kind (supported: bash)" });
+      }
+      if (!payload || typeof payload !== "object" || payload.kind !== "bash" || !payload.cmd) {
+        return res.status(400).json({ error: "payload must be { kind: 'bash', cmd: <string>, cwd?, timeoutMs? }" });
+      }
+      const job = jobsStore.create({ kind, payload, label, aiSessionId, chatId });
+      res.json(job);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/jobs", async (req, res, next) => {
+    try {
+      const jobsStore = await import("../jobs/store.js");
+      const status = req.query.status as any;
+      const aiSessionId = req.query.aiSessionId as string | undefined;
+      const limit = Math.min(Number(req.query.limit ?? 100), 1000) || 100;
+      res.json(jobsStore.list({ status, aiSessionId, limit }));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/jobs/:id", async (req, res, next) => {
+    try {
+      const jobsStore = await import("../jobs/store.js");
+      const job = jobsStore.read(req.params.id);
+      if (!job) return res.status(404).json({ error: "job not found" });
+      res.json(job);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/jobs/:id/cancel", async (req, res, next) => {
+    try {
+      const jobsStore = await import("../jobs/store.js");
+      const ok = jobsStore.cancel(req.params.id);
+      if (!ok) return res.status(409).json({ error: "job not pending or running" });
+      res.json({ ok: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Sub-agents — HTTP equivalents of `ais sub-agents`.
+  app.post("/sub-agents", async (req, res, next) => {
+    try {
+      const { startSubAgent } = await import("../sub-agents/runner.js");
+      const { parentAiSessionId, provider, prompt, cwd, label, steerChatId } = req.body ?? {};
+      if (!parentAiSessionId) return res.status(400).json({ error: "parentAiSessionId required" });
+      if (!provider) return res.status(400).json({ error: "provider required" });
+      if (!prompt) return res.status(400).json({ error: "prompt required" });
+      const sub = await startSubAgent({ parentAiSessionId, provider, prompt, cwd, label, steerChatId });
+      res.json(sub);
+    } catch (e: any) {
+      // startSubAgent throws on policy violations (one-level-deep, unknown
+      // provider, missing parent) — surface those as 400 not 500.
+      const msg = e?.message ?? String(e);
+      if (/^one-level-deep|^unknown provider|not found/i.test(msg)) {
+        return res.status(400).json({ error: msg });
+      }
+      next(e);
+    }
+  });
+
+  app.get("/sub-agents", async (req, res, next) => {
+    try {
+      const subStore = await import("../sub-agents/store.js");
+      const parentAiSessionId = req.query.parent as string | undefined;
+      if (!parentAiSessionId) {
+        return res.status(400).json({ error: "?parent=<ai-session-id> required" });
+      }
+      res.json(subStore.listByParent(parentAiSessionId));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/sub-agents/:id", async (req, res, next) => {
+    try {
+      const subStore = await import("../sub-agents/store.js");
+      const sub = subStore.read(req.params.id);
+      if (!sub) return res.status(404).json({ error: "sub-agent not found" });
+      res.json(sub);
+    } catch (e) {
+      next(e);
+    }
+  });
+
   app.get("/hooks", (req, res) => {
     const sessionId = (req.query.session_id as string | undefined) ?? undefined;
     const limit = Math.min(Number(req.query.limit ?? 200), 1000) || 200;

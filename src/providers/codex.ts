@@ -5,6 +5,7 @@ import fg from "fast-glob";
 import { startRun } from "../runs/start.js";
 import { planAiSessionResolution } from "../ai-sessions/finalize.js";
 import { buildCatalog } from "../skills/catalog.js";
+import { outstandingJobsSection } from "../jobs/prompt-section.js";
 import { loadDotenv } from "../sessions/dotenv.js";
 import type { RunHandle } from "../runs/types.js";
 import type {
@@ -143,8 +144,12 @@ export const codexProvider: Provider = {
             threadParams.approvalPolicy = "never";
           }
           const skillsCatalog = effectiveCwd ? buildCatalog(effectiveCwd) : "";
-          if (skillsCatalog) {
-            threadParams.developer_instructions = skillsCatalog;
+          const jobsSection = outstandingJobsSection(plan.preResolvedAiSessionId);
+          const developerInstructions = [skillsCatalog, jobsSection]
+            .filter(Boolean)
+            .join("\n\n");
+          if (developerInstructions) {
+            threadParams.developer_instructions = developerInstructions;
           }
 
           const threadResult: any = effectiveSessionId

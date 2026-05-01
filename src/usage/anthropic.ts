@@ -1,7 +1,15 @@
 import { homedir } from "node:os";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import type { UsageSnapshot, UsageWindow } from "./types.js";
+
+// Anthropic OAuth client_id used by claude-code (Console OAuth client).
+// Documented in claude-code's own auth flow + several community auth shims.
+const CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
+// Refresh proactively when this close to expiry — gives the probe a small
+// buffer instead of trying refresh-on-401 every time.
+const REFRESH_LEAD_MS = 5 * 60 * 1000;
 
 interface AnthropicProbeConfig {
   provider: string;
@@ -94,16 +102,129 @@ export async function probeAnthropic(cfg: AnthropicProbeConfig): Promise<UsageSn
   };
 }
 
-// Reads the OAuth bearer from ~/.claude/.credentials.json. Returns null when
-// the user is on a 1P API key (no OAuth) or the file doesn't exist.
-export function readClaudeOAuth(): string | null {
-  const p = join(process.env.CLAUDE_HOME || join(homedir(), ".claude"), ".credentials.json");
+function credentialsPath(): string {
+  return join(
+    process.env.CLAUDE_HOME || join(homedir(), ".claude"),
+    ".credentials.json",
+  );
+}
+
+interface ClaudeOAuthRecord {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+}
+
+function readClaudeOAuthRecord(): ClaudeOAuthRecord | null {
+  const p = credentialsPath();
   if (!existsSync(p)) return null;
   try {
     const j = JSON.parse(readFileSync(p, "utf8"));
-    return j?.claudeAiOauth?.accessToken ?? null;
+    const oauth = j?.claudeAiOauth;
+    if (!oauth?.accessToken) return null;
+    return {
+      accessToken: oauth.accessToken,
+      refreshToken: oauth.refreshToken,
+      expiresAt: typeof oauth.expiresAt === "number" ? oauth.expiresAt : undefined,
+    };
   } catch {
     return null;
+  }
+}
+
+// Legacy compat — anyone importing the old name still gets a string.
+export function readClaudeOAuth(): string | null {
+  return readClaudeOAuthRecord()?.accessToken ?? null;
+}
+
+function writeClaudeOAuth(updated: {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt: number;
+}): void {
+  const p = credentialsPath();
+  let existing: any = {};
+  try {
+    existing = JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    /* file may be missing on the first write */
+  }
+  const merged = {
+    ...existing,
+    claudeAiOauth: {
+      ...(existing?.claudeAiOauth ?? {}),
+      accessToken: updated.accessToken,
+      refreshToken:
+        updated.refreshToken ?? existing?.claudeAiOauth?.refreshToken,
+      expiresAt: updated.expiresAt,
+    },
+  };
+  // Atomic write so claude-code (which also reads this file) never sees a
+  // half-written JSON.
+  const tmp = `${p}.tmp.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(merged, null, 2));
+  renameSync(tmp, p);
+}
+
+// POST /v1/oauth/token with grant_type=refresh_token. Returns a fresh
+// access_token + the refresh_token Anthropic gives back (sometimes the same,
+// sometimes rotated). Writes the result back to .credentials.json so
+// subsequent probes (and claude-code itself) pick up the new tokens.
+async function refreshClaudeOAuth(refreshToken: string): Promise<ClaudeOAuthRecord> {
+  const resp = await fetch(CLAUDE_OAUTH_TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: CLAUDE_OAUTH_CLIENT_ID,
+    }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(`oauth refresh failed (${resp.status}): ${body.slice(0, 200)}`);
+  }
+  const j = (await resp.json()) as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+  };
+  if (!j.access_token) throw new Error("oauth refresh response missing access_token");
+  const expiresAt = Date.now() + (j.expires_in ?? 3600) * 1000;
+  writeClaudeOAuth({
+    accessToken: j.access_token,
+    refreshToken: j.refresh_token,
+    expiresAt,
+  });
+  return {
+    accessToken: j.access_token,
+    refreshToken: j.refresh_token ?? refreshToken,
+    expiresAt,
+  };
+}
+
+// Read the OAuth record, refresh if expired or close to it, and return the
+// (now-fresh) access token. Caller passes a `notes` array we can drop a
+// human-readable note into when the refresh ran or failed — it shows up in
+// the /usage snapshot output so users can tell why a probe took longer
+// than usual or why it errored.
+export async function getFreshClaudeBearer(notes: string[]): Promise<string | null> {
+  const rec = readClaudeOAuthRecord();
+  if (!rec) return null;
+  const expiringSoon =
+    typeof rec.expiresAt === "number" && rec.expiresAt - Date.now() < REFRESH_LEAD_MS;
+  if (!expiringSoon) return rec.accessToken;
+  if (!rec.refreshToken) {
+    notes.push("oauth token near/expired and no refresh_token in .credentials.json");
+    return rec.accessToken;
+  }
+  try {
+    const refreshed = await refreshClaudeOAuth(rec.refreshToken);
+    notes.push(`oauth refreshed; new expiresAt=${new Date(refreshed.expiresAt!).toISOString()}`);
+    return refreshed.accessToken;
+  } catch (e: any) {
+    notes.push(`oauth refresh failed: ${e?.message ?? e}`);
+    return rec.accessToken; // try the stale token anyway
   }
 }
 

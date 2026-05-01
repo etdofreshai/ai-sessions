@@ -1,5 +1,5 @@
 import * as store from "./store.js";
-import { probeAnthropic, readClaudeOAuth, readGlmAuth } from "./anthropic.js";
+import { probeAnthropic, getFreshClaudeBearer, readGlmAuth } from "./anthropic.js";
 import { probeGlmQuota } from "./glm.js";
 import { probeCodex } from "./codex.js";
 import type { UsageSnapshot } from "./types.js";
@@ -8,23 +8,31 @@ const FRESH_MS = 60_000;
 
 async function probe(provider: string): Promise<UsageSnapshot> {
   if (provider === "claude") {
-    const tok = readClaudeOAuth();
+    const refreshNotes: string[] = [];
+    const tok = await getFreshClaudeBearer(refreshNotes);
     if (!tok) {
       return {
         provider,
         windows: [],
         observedAt: new Date().toISOString(),
         error: "no_oauth_token",
-        notes: ["~/.claude/.credentials.json not found or missing claudeAiOauth.accessToken"],
+        notes: [
+          "~/.claude/.credentials.json not found or missing claudeAiOauth.accessToken",
+          ...refreshNotes,
+        ],
       };
     }
-    return probeAnthropic({
+    const snap = await probeAnthropic({
       provider,
       baseUrl: "https://api.anthropic.com",
       authHeader: { name: "authorization", value: `Bearer ${tok}` },
       model: "claude-haiku-4-5-20251001",
       extraHeaders: { "anthropic-beta": "oauth-2025-04-20" },
     });
+    if (refreshNotes.length) {
+      snap.notes = [...refreshNotes, ...(snap.notes ?? [])];
+    }
+    return snap;
   }
 
   if (provider === "glm") {

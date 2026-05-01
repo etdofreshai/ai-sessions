@@ -57,7 +57,7 @@ const SLASH_COMMANDS = [
   { command: "effort", description: "Set reasoning effort: /effort [low|medium|high|xhigh] | /effort default <level>" },
   { command: "cwd", description: "Show the bound session's cwd (read-only — use /new or /fork to switch)" },
   { command: "rename", description: "Rename the bound session (no arg = auto-summarize)" },
-  { command: "skills", description: "List skills + toggle slash advertising: /skills | /skills on | /skills off" },
+  { command: "skills", description: "List skills, toggle ads, refresh menu: /skills | /skills on|off | /skills refresh" },
   { command: "stop", description: "Interrupt the current run on this session" },
   { command: "trace", description: "Show full detail of the last run (tools, inputs, outputs, reply)" },
   { command: "export", description: "Export the bound session's transcript as Markdown" },
@@ -819,6 +819,24 @@ export class TelegramChannel implements Channel {
             sub === "on"
               ? "Skills will be advertised as individual slash commands. Tap the menu to refresh."
               : "Skills will no longer appear in the slash menu. Direct typing of /<skill> still works.",
+        });
+        return true;
+      }
+      // /skills refresh — re-scan the skills/ directory and re-publish the
+      // bot menu. Use after adding a new skill, renaming a SKILL.md, or
+      // editing a frontmatter description. The skill list itself is read
+      // fresh on every dispatch, so this is purely about the Telegram
+      // menu — direct typing of /<skill> always picks up new skills
+      // immediately without refreshing.
+      if (sub === "refresh") {
+        const before = buildSkillCommands(workspaceDir()).length;
+        await this.refreshCommandMenu();
+        const after = buildSkillCommands(workspaceDir()).length;
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Skills menu refreshed (${after} skill${after === 1 ? "" : "s"} advertised${
+            before !== after ? `, was ${before}` : ""
+          }). Tap the menu to see the new list.`,
         });
         return true;
       }

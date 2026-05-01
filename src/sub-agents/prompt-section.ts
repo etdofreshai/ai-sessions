@@ -30,7 +30,7 @@ export function subAgentPolicySection(aiSessionId: string | undefined): string {
     lines.push(
       "When you need to delegate a chunk of work to a fresh agent process, " +
         "prefer `ais sub-agents start <provider> --parent <id> --prompt ...` " +
-        "(see the `ai-sessions-subagents` skill) over your built-in `Task` " +
+        "(see the `orchestration` skill) over your built-in `Task` " +
         "tool. The outer harness tracks the parent ↔ child relationship, " +
         "routes the child's hooks back to this chat as a preview bubble, " +
         "and posts the final reply automatically — your `Task` tool can't " +

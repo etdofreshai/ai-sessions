@@ -41,7 +41,7 @@ const SLASH_COMMANDS = [
   { command: "status", description: "Show this chat's bound session" },
   { command: "bind", description: "(Re)bind this chat to a Session" },
   { command: "unbind", description: "Remove this chat's binding from its Session" },
-  { command: "new", description: "Start a new session on the current provider and bind this chat" },
+  { command: "new", description: "Start a new session: /new [<provider>] [<cwd>] (both inherit the current binding)" },
   { command: "fork", description: "Fork the bound session to another provider: /fork <provider>" },
   { command: "remote", description: "Toggle claude remote-control: /remote [true|false]" },
   { command: "effort", description: "Set reasoning effort: /effort [low|medium|high|xhigh]" },
@@ -533,11 +533,16 @@ export class TelegramChannel implements Channel {
 
     if (cmd === "/new") {
       const current = aiStore.findByTelegramChat(chatId);
-      const provider = arg.trim() || current?.provider;
+      // Format: /new [<provider>] [<cwd>]
+      // Both args optional. Provider defaults to the current binding's
+      // provider; cwd defaults to the current binding's cwd.
+      const m = /^(\S+)?(?:\s+(.+))?$/.exec(arg.trim());
+      const provider = (m?.[1] || current?.provider) ?? null;
+      const cwdArg = m?.[2]?.trim();
       if (!provider) {
         await api.sendMessage({
           chat_id: chatId,
-          text: "No bound session — pass a provider, e.g. /new claude.",
+          text: "No bound session — pass a provider, e.g. /new claude [<cwd>].",
         });
         return true;
       }
@@ -545,16 +550,26 @@ export class TelegramChannel implements Channel {
         await api.sendMessage({ chat_id: chatId, text: `Unknown provider: ${provider}` });
         return true;
       }
+      // Resolve cwd: explicit arg wins, falls back to inheriting from the
+      // previous binding so chats already working under a specific tree
+      // keep operating there. Relative paths resolve against the previous
+      // cwd (or workspaceDir if there isn't one).
+      let cwd: string | undefined;
+      if (cwdArg) {
+        const { isAbsolute, resolve } = await import("node:path");
+        cwd = isAbsolute(cwdArg)
+          ? cwdArg
+          : resolve(current?.cwd ?? workspaceDir(), cwdArg);
+      } else {
+        cwd = current?.cwd;
+      }
       // Detach the chat from the previous session so the new one owns the binding.
       if (current) {
         current.channels = { ...(current.channels ?? {}) };
         delete current.channels.telegram;
         aiStore.write(current);
       }
-      // Inherit the previous binding's cwd so /new in a chat that was already
-      // working under a specific directory keeps operating there. Caller can
-      // still /cwd to repoint after.
-      const ai = aiStore.create({ provider, cwd: current?.cwd });
+      const ai = aiStore.create({ provider, cwd });
       ai.channels = { ...(ai.channels ?? {}), telegram: { chatId } };
       aiStore.write(ai);
       this.pending.delete(chatId);

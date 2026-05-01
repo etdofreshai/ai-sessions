@@ -161,4 +161,15 @@ export const migrations: string[] = [
   CREATE INDEX sub_agents_child ON sub_agents(child_ai_session_id);
   CREATE INDEX sub_agents_provider_session ON sub_agents(provider_session_id);
   `,
+
+  // 5. provider_defaults — per-provider settings that aren't tied to a
+  // specific AiSession. First use case is the default reasoning effort
+  // /effort default <level> writes; future entries (default cwd, default
+  // model, etc.) can layer on the same row.
+  `
+  CREATE TABLE provider_defaults (
+    provider       TEXT PRIMARY KEY,
+    default_effort TEXT
+  );
+  `,
 ];

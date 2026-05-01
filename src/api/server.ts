@@ -200,14 +200,10 @@ export function createApp() {
   app.post("/sessions/:id/fork", async (req, res, next) => {
     try {
       const { forkAiSession } = await import("../ai-sessions/fork.js");
-      const { targetProvider, destructive, cwd } = req.body ?? {};
-      if (!targetProvider) {
-        return res.status(400).json({ error: "targetProvider required" });
-      }
+      const { targetProvider, cwd } = req.body ?? {};
       const result = await forkAiSession({
         sourceId: req.params.id,
-        targetProvider,
-        destructive: !!destructive,
+        targetProvider, // optional — omit for same-provider fork
         cwd,
       });
       res.json(result);

@@ -1,7 +1,12 @@
 import * as aiStore from "../ai-sessions/store.js";
 import { getProvider, listProviderNames } from "../providers/index.js";
 import { getLive } from "../runs/registry.js";
-import { workspaceDir, defaultReasoningEffort, isReasoningEffort } from "../config.js";
+import { workspaceDir, isReasoningEffort } from "../config.js";
+import {
+  resolveProviderEffort,
+  setProviderDefaultEffort,
+  getProviderDefaultEffort,
+} from "../providers/defaults.js";
 import { listSkills } from "../skills/catalog.js";
 import { previewFromJsonl, shortenPath } from "../sessions/preview.js";
 import { markdownToTelegramHtml } from "./telegram-format.js";
@@ -40,9 +45,9 @@ const SLASH_COMMANDS = [
   { command: "status", description: "Show this chat's bound session" },
   { command: "bind", description: "Bind this chat to a Session: /bind | /bind off" },
   { command: "new", description: "Start a new session: /new [<provider>] [<cwd>]" },
-  { command: "fork", description: "Fork the bound session to another provider: /fork <provider>" },
-  { command: "effort", description: "Set reasoning effort: /effort [low|medium|high|xhigh]" },
-  { command: "cwd", description: "Show or set the bound session's cwd" },
+  { command: "fork", description: "Fork the bound session: /fork (same provider) | /fork <provider>" },
+  { command: "effort", description: "Set reasoning effort: /effort [low|medium|high|xhigh] | /effort default <level>" },
+  { command: "cwd", description: "Show the bound session's cwd (read-only — use /new or /fork to switch)" },
   { command: "rename", description: "Rename the bound session (no arg = auto-summarize)" },
   { command: "skills", description: "List enabled skills in the workspace" },
   { command: "stop", description: "Interrupt the current run on this session" },
@@ -607,19 +612,54 @@ export class TelegramChannel implements Channel {
         await api.sendMessage({ chat_id: chatId, text: "Not bound." });
         return true;
       }
-      const a = arg.trim().toLowerCase();
-      if (!a) {
-        const eff = ai.reasoningEffort ?? defaultReasoningEffort();
+      const trimmed = arg.trim();
+      const tokens = trimmed.split(/\s+/).filter(Boolean);
+
+      // /effort default <level> — set the provider-wide default for new
+      // sessions (doesn't touch this session's own override). Affects every
+      // future AiSession on this provider that doesn't have an explicit
+      // /effort set.
+      if (tokens[0]?.toLowerCase() === "default") {
+        const level = tokens[1]?.toLowerCase();
+        if (!level || !isReasoningEffort(level)) {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: "Usage: /effort default [low|medium|high|xhigh]",
+          });
+          return true;
+        }
+        setProviderDefaultEffort(ai.provider, level);
         await api.sendMessage({
           chat_id: chatId,
-          text: `Reasoning effort: ${eff}${ai.reasoningEffort ? "" : " (default)"}`,
+          text: `For provider ${ai.provider}, the default effort for new sessions will be: ${level}`,
         });
         return true;
       }
+
+      // /effort — show this session's effort + the resolution chain.
+      if (!trimmed) {
+        const sessionOverride = ai.reasoningEffort;
+        const providerDefault = getProviderDefaultEffort(ai.provider);
+        const effective = sessionOverride ?? resolveProviderEffort(ai.provider);
+        const lines = [`Reasoning effort: ${effective}`];
+        if (sessionOverride) {
+          lines.push(`  · session override: ${sessionOverride}`);
+        }
+        if (providerDefault) {
+          lines.push(`  · ${ai.provider} default: ${providerDefault}`);
+        } else {
+          lines.push(`  · ${ai.provider} default: (env / "low")`);
+        }
+        await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
+        return true;
+      }
+
+      // /effort <level> — set just this session's override.
+      const a = trimmed.toLowerCase();
       if (!isReasoningEffort(a)) {
         await api.sendMessage({
           chat_id: chatId,
-          text: "Usage: /effort [low|medium|high|xhigh]",
+          text: "Usage: /effort [low|medium|high|xhigh] | /effort default <level>",
         });
         return true;
       }
@@ -642,30 +682,24 @@ export class TelegramChannel implements Channel {
         });
         return true;
       }
-      const target = arg.trim().toLowerCase();
-      const choices = listProviderNames().filter((p) => p !== current.provider);
-      if (!target) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: `Usage: /fork <provider>\nAvailable: ${choices.join(", ") || "(none)"}`,
-        });
-        return true;
-      }
+      // /fork → same provider; /fork <provider> → cross-provider. Both use
+      // the markdown-attachment seeding path so the new agent gets the
+      // entire transcript without bloating its first prompt.
+      const target = (arg.trim() || current.provider).toLowerCase();
       if (!listProviderNames().includes(target)) {
-        await api.sendMessage({ chat_id: chatId, text: `Unknown provider: ${target}` });
-        return true;
-      }
-      if (target === current.provider) {
         await api.sendMessage({
           chat_id: chatId,
-          text: `Already on ${target}; pick a different provider to fork into.`,
+          text: `Unknown provider: ${target}\nAvailable: ${listProviderNames().join(", ")}`,
         });
         return true;
       }
       const stopTyping = this.startTyping(chatId);
       const status = await api.sendMessage({
         chat_id: chatId,
-        text: `🌿 Forking session into ${target}…`,
+        text:
+          target === current.provider
+            ? `🌿 Forking session (same provider: ${target})…`
+            : `🌿 Forking session ${current.provider} → ${target}…`,
       });
       try {
         const { forkAiSession } = await import("../ai-sessions/fork.js");
@@ -691,7 +725,7 @@ export class TelegramChannel implements Channel {
         await api.editMessageText({
           chat_id: chatId,
           message_id: status.message_id,
-          text: `Forked into ${target} (seed: ${result.seedMode}, ~${result.estimatedTokens} tokens). Chat now bound to ${result.id.slice(0, 8)}.`,
+          text: `Forked into ${target} (${result.messageCount} messages attached as markdown). Chat now bound to ${result.id.slice(0, 8)}.`,
         });
       } catch (e: any) {
         await api.editMessageText({
@@ -711,16 +745,14 @@ export class TelegramChannel implements Channel {
         await api.sendMessage({ chat_id: chatId, text: "Not bound." });
         return true;
       }
-      if (!arg) {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: `cwd: ${ai.cwd ?? "(unset)"}`,
-        });
-        return true;
+      // Show-only. Provider session storage (esp. claude) is keyed by cwd —
+      // mutating it after the session was created loses the resume. Use
+      // /new <provider> <cwd> or /fork to start somewhere else.
+      const lines = [`cwd: ${ai.cwd ?? "(unset)"}`];
+      if (arg.trim()) {
+        lines.push("(read-only — use /new or /fork to switch directories)");
       }
-      ai.cwd = arg;
-      aiStore.write(ai);
-      await api.sendMessage({ chat_id: chatId, text: `cwd set to: ${arg}` });
+      await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
       return true;
     }
 
@@ -779,11 +811,16 @@ export class TelegramChannel implements Channel {
         });
         return true;
       }
-      const lines = [`Skills under ${cwd}/skills/:`];
+      // Per-skill block: <bold name>\n<description>\n\n<bold name>\n…
+      // Markdown bold renders to <b> via markdownToTelegramHtml so the
+      // names stand out. Empty description: skip the second line.
+      const blocks = [`Skills under ${cwd}/skills/`, ""];
       for (const s of skills) {
-        lines.push(`• ${s.name}${s.description ? ` — ${s.description}` : ""}`);
+        blocks.push(`**${s.name}**`);
+        if (s.description) blocks.push(s.description);
+        blocks.push(""); // blank separator
       }
-      await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
+      await this.send({ chatId }, { text: blocks.join("\n").trimEnd() });
       return true;
     }
 
@@ -1891,7 +1928,7 @@ export class TelegramChannel implements Channel {
         aiSessionId: ai.id,
         cwd: ai.cwd ?? workspaceDir(),
         yolo: true,
-        effort: ai.reasoningEffort ?? defaultReasoningEffort(),
+        effort: ai.reasoningEffort ?? resolveProviderEffort(ai.provider),
       });
       // Make the live handle available to follow-up dispatches so they can
       // steer (inject) text into this turn instead of spawning a parallel one.

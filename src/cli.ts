@@ -212,28 +212,27 @@ sessions
   });
 
 sessions
-  .command("fork <id> <newProvider>")
+  .command("fork <id> [newProvider]")
   .description(
-    "Create a new AiSession on a different provider, seeded from the source session"
+    "Create a new AiSession seeded from the source via a markdown-attached transcript. " +
+      "Omit newProvider to fork within the same provider.",
   )
-  .option("--destructive", "summarize instead of replaying full transcript")
-  .option("-c, --cwd <dir>", "working directory for the seed run on the new provider")
+  .option("-c, --cwd <dir>", "working directory for the seed run")
   .action(
     async (
       id: string,
-      newProvider: string,
-      opts: { destructive?: boolean; cwd?: string }
+      newProvider: string | undefined,
+      opts: { cwd?: string }
     ) => {
       const { forkAiSession } = await import("./ai-sessions/fork.js");
       const result = await forkAiSession({
         sourceId: id,
         targetProvider: newProvider,
-        destructive: opts.destructive,
         cwd: opts.cwd,
       });
       console.log(`forked: ${result.id}  provider: ${result.provider}  session: ${result.sessionId}`);
       console.error(
-        `seed mode: ${result.seedMode}  (~${result.estimatedTokens} tokens estimated)`
+        `${result.messageCount} messages attached at ${result.transcriptPath}`,
       );
     }
   );

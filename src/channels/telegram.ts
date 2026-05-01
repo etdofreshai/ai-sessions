@@ -50,7 +50,8 @@ const SLASH_COMMANDS = [
   { command: "cwd", description: "Show or set the bound session's cwd" },
   { command: "rename", description: "Rename the bound session (no arg = auto-summarize)" },
   { command: "skills", description: "List enabled skills in the workspace" },
-  { command: "interrupt", description: "Interrupt the current run (best-effort)" },
+  { command: "interrupt", description: "Interrupt the current run on this session" },
+  { command: "stop", description: "Alias for /interrupt" },
   { command: "trace", description: "Show full detail of the last run (tools, inputs, outputs, reply)" },
   { command: "export", description: "Export the bound session's transcript as Markdown" },
   { command: "agent", description: "Run a one-shot sub-agent: /agent [<provider>] prompt" },
@@ -1256,18 +1257,29 @@ export class TelegramChannel implements Channel {
       return true;
     }
 
-    if (cmd === "/interrupt") {
-      // Existing logic in routeToSession also handles "/interrupt" prefix; this
-      // path lets unbound chats get a clearer message.
+    if (cmd === "/interrupt" || cmd === "/stop") {
       const ai = aiStore.findByTelegramChat(chatId);
       if (!ai) {
         await api.sendMessage({ chat_id: chatId, text: "Not bound." });
         return true;
       }
-      await api.sendMessage({
-        chat_id: chatId,
-        text: "Interrupt requested. (Only effective if a run is live in this server process.)",
-      });
+      const turn = turnsRegistry.getByAiSession(ai.id);
+      if (!turn?.handle) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: "No live run on this session in this process.",
+        });
+        return true;
+      }
+      try {
+        await turn.handle.interrupt();
+        await api.sendMessage({ chat_id: chatId, text: "Interrupted." });
+      } catch (e: any) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Interrupt failed: ${e?.message ?? e}`,
+        });
+      }
       return true;
     }
 
@@ -1979,19 +1991,35 @@ export class TelegramChannel implements Channel {
   ): Promise<void> {
     if (!this.api) return;
     const trimmed = text.trim();
-    if (trimmed.startsWith("/interrupt")) {
-      await this.api.sendMessage({
-        chat_id: chatId,
-        text: "Interrupt requested. (Note: only works if a run on this session is live in this server process.)",
-      });
-      return;
-    }
+    // /interrupt and /stop are handled in handleSlashCommand and never reach
+    // here — both call handle.interrupt() on the live ActiveTurn.
     if (!trimmed && !attachments.length) return;
     const ai = aiStore.read(aiSessionId);
     if (!ai) {
       await this.api.sendMessage({ chat_id: chatId, text: "Session not found." });
       return;
     }
+
+    // If a turn for this AiSession is already in flight, steer the new text
+    // into it instead of spawning a parallel query() (which would race on
+    // the same provider session and give us mixed tool traces). The user's
+    // mental model: "follow-up while the agent is thinking joins the same
+    // thought." Attachments mid-turn aren't supported by steer — fall back
+    // to a queued turn for those.
+    const inFlight = turnsRegistry.getByAiSession(aiSessionId);
+    if (inFlight && inFlight.handle?.steer && trimmed && !attachments.length) {
+      try {
+        await inFlight.handle.steer(trimmed);
+        inFlight.status.push(`✏️ steer: ${trimmed.slice(0, 80)}`);
+        return;
+      } catch (e: any) {
+        // If steer fails (e.g. provider doesn't really support it), log
+        // and fall through to spawning a fresh turn — the legacy parallel
+        // behavior. Better than silently swallowing the user's message.
+        console.error("[telegram] steer failed; falling back to new turn:", e?.message ?? e);
+      }
+    }
+
     const stopTyping = this.startTyping(chatId);
     const status = await this.openStatusBlock(chatId);
     if (attachments.length) {
@@ -2036,6 +2064,9 @@ export class TelegramChannel implements Channel {
         yolo: true,
         effort: ai.reasoningEffort ?? defaultReasoningEffort(),
       });
+      // Make the live handle available to follow-up dispatches so they can
+      // steer (inject) text into this turn instead of spawning a parallel one.
+      turn.handle = handle;
       const live = getLive(handle.meta.runId);
       // Drain the SDK stream for the two things hooks don't carry: the
       // session_id (so we can route PostToolUse hooks for fresh sessions

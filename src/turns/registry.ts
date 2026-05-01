@@ -1,5 +1,6 @@
 import type { StatusBlock } from "../channels/telegram-status.js";
 import type { TraceRecord } from "../channels/telegram-utils.js";
+import type { RunHandle } from "../runs/types.js";
 
 // Per-active-turn UI state. Created when routeToSession kicks off a turn,
 // looked up by hook handlers as PreToolUse/PostToolUse events arrive, and
@@ -17,6 +18,10 @@ export interface ActiveTurn {
   // Set of image-attachment paths already sent to the chat — prevents
   // duplicate sendPhoto when multiple events reference the same path.
   sentImagePaths: Set<string>;
+  // The in-flight provider run. Used by routeToSession on a follow-up
+  // message to steer (inject) the new text into the same turn rather
+  // than spawning a parallel one.
+  handle?: RunHandle;
 }
 
 const byAiSession = new Map<string, ActiveTurn>();

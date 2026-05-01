@@ -200,6 +200,24 @@ export const codexProvider: Provider = {
               console.error("[codex] synthetic hook ingest failed:", e instanceof Error ? e.message : String(e));
             }
           };
+          const synthesizeStopHook = (status: string, error?: string): void => {
+            if (!threadId) return;
+            try {
+              ingestHook({
+                harness: "codex",
+                payload: {
+                  hook_event_name: "Stop",
+                  session_id: threadId,
+                  status,
+                  ...(error ? { error } : {}),
+                  synthetic: true,
+                  source: "codex-app-server",
+                },
+              });
+            } catch (e) {
+              console.error("[codex] synthetic Stop hook ingest failed:", e instanceof Error ? e.message : String(e));
+            }
+          };
           const turnDone = new Promise<{ status: string; error?: string }>((resolve) => {
             const unsubs: Array<() => void> = [];
             const cleanup = () => unsubs.forEach((fn) => fn());
@@ -283,16 +301,16 @@ export const codexProvider: Provider = {
                 cleanup();
                 const status = p?.turn?.status ?? "completed";
                 const error = p?.turn?.error?.message;
+                synthesizeStopHook(status, error);
                 resolve({ status, ...(error ? { error } : {}) });
               })
             );
             unsubs.push(
               client.on("turn/failed", (p: any) => {
                 cleanup();
-                resolve({
-                  status: "failed",
-                  error: p?.error?.message ?? "turn failed",
-                });
+                const error = p?.error?.message ?? "turn failed";
+                synthesizeStopHook("failed", error);
+                resolve({ status: "failed", error });
               })
             );
           });

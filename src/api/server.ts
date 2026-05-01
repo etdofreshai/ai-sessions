@@ -21,6 +21,7 @@ import { makeJob, nextFireAfter } from "../crons/scheduler.js";
 import { getUsage } from "../usage/index.js";
 import { VERSION, GIT } from "../version.js";
 import * as hookStore from "../hooks/store.js";
+import { dispatchHook } from "../hooks/dispatch.js";
 
 export function createApp() {
   const app = express();
@@ -283,20 +284,26 @@ export function createApp() {
   // launches) layers on top of this in subsequent steps.
   function recordHook(harness: "claude" | "codex") {
     return (req: Request, res: Response) => {
+      const payload = (req.body ?? {}) as Record<string, unknown>;
       try {
-        const payload = (req.body ?? {}) as Record<string, unknown>;
         const ev = hookStore.record({ harness, payload });
         console.error(
           `[hooks/${harness}] ${ev.eventName}` +
             (ev.toolName ? ` ${ev.toolName}` : "") +
             (ev.sessionId ? ` session=${ev.sessionId.slice(0, 8)}` : ""),
         );
-        res.json({ continue: true });
       } catch (e: any) {
         console.error(`[hooks/${harness}] persist failed:`, e?.message ?? e);
-        // Don't block the harness on our persistence failure — degrade open.
-        res.json({ continue: true });
       }
+      // Drive in-flight UI / bg-task capture from the event. Persistence
+      // failure shouldn't block dispatch and dispatch failure shouldn't
+      // block the harness — both degrade open with a {"continue": true}.
+      try {
+        dispatchHook({ harness, payload });
+      } catch (e: any) {
+        console.error(`[hooks/${harness}] dispatch failed:`, e?.message ?? e);
+      }
+      res.json({ continue: true });
     };
   }
 

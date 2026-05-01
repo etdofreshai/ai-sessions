@@ -6,6 +6,7 @@ import { listSkills } from "../skills/catalog.js";
 import { previewFromJsonl, shortenPath } from "../sessions/preview.js";
 import { markdownToTelegramHtml } from "./telegram-format.js";
 import { openStatusBlock } from "./telegram-status.js";
+import * as turnsRegistry from "../turns/registry.js";
 import {
   type TraceRecord,
   formatToolInput,
@@ -1995,58 +1996,42 @@ export class TelegramChannel implements Channel {
     // Suppress the watcher for the duration of this run — anything our run
     // appends to the JSONL will already be shown via the status block.
     const unmute = sessionWatcher.mute(ai.id);
+    // Register an active turn so PreToolUse/PostToolUse hooks know which
+    // status bubble + trace to drive. Hooks are the only source of
+    // intermediate UI now — we stop iterating tool/text events from the
+    // SDK below and just drain the stream for image events + final output.
+    const sentImagePaths = new Set<string>();
+    const turn: turnsRegistry.ActiveTurn = {
+      aiSessionId: ai.id,
+      providerSessionId: ai.sessionId, // backfilled below for new sessions
+      chatId,
+      threadId: ai.channels?.telegram?.threadId,
+      status,
+      trace,
+      startedAt: trace.startedAt,
+      sentImagePaths,
+    };
+    turnsRegistry.register(turn);
     try {
       const handle = getProvider(ai.provider).run({
         prompt: trimmed || "(see attachments)",
         attachments,
         aiSessionId: ai.id,
-        // Honor the AiSession's cwd so the model can reach files in that
-        // tree. Falls back to the global workspaceDir for unscoped sessions.
         cwd: ai.cwd ?? workspaceDir(),
         yolo: true,
         effort: ai.reasoningEffort ?? defaultReasoningEffort(),
       });
       const live = getLive(handle.meta.runId);
-      const sentImagePaths = new Set<string>();
-      // Last tool_use seen — used to pair the next tool_result with its name
-      // and input, so we can detect Bash/Agent run_in_background launches.
-      let pendingTool: { name: string; input: any } | null = null;
-      const watcher = (async () => {
+      // Drain the SDK stream for the two things hooks don't carry: the
+      // session_id (so we can route PostToolUse hooks for fresh sessions
+      // back to this turn) and image events (codex's imageGeneration item
+      // isn't a standard hook event). Everything else (tool_use, tool_result,
+      // text) is now handled by hookDispatch via the /hooks endpoint.
+      const drainer = (async () => {
         if (!live) return;
         for await (const ev of live.events) {
-          if (ev.type === "tool_use") {
-            const inputStr = formatToolInput(ev.input);
-            status.push(`🔧 ${ev.name}${inputStr ? `: ${inputStr}` : ""}`);
-            trace.events.push({ ts: Date.now(), type: "tool_use", name: ev.name, input: ev.input });
-            pendingTool = { name: ev.name, input: ev.input };
-          } else if (ev.type === "text") {
-            // Stream model text into the status bubble so the user sees
-            // intermediate narration (e.g. "Let me check…") as it arrives,
-            // not all at once at end-of-turn. The final `finalize()` swaps
-            // the bubble with the clean final response.
-            status.appendText(ev.text);
-          } else if (ev.type === "tool_result") {
-            // Mark previous tool line as complete; light touch.
-            status.markLastDone();
-            trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
-            // Resume detection: if the tool that just resolved was a
-            // backgrounded Bash/Agent launch, record the task so the
-            // resume poller can pick up its completion later.
-            if (pendingTool) {
-              try {
-                const { detectBgLaunch } = await import("../resume/detect.js");
-                const { recordPendingTask } = await import("../resume/state.js");
-                const task = detectBgLaunch({
-                  toolName: pendingTool.name,
-                  toolInput: pendingTool.input,
-                  toolOutput: ev.output,
-                });
-                if (task) recordPendingTask(ai.id, task);
-              } catch (e) {
-                console.error("[resume] capture failed:", e);
-              }
-              pendingTool = null;
-            }
+          if (ev.type === "session_id") {
+            turnsRegistry.bindProviderSession(ai.id, ev.sessionId);
           } else if (ev.type === "image") {
             try {
               const { readFileSync } = await import("node:fs");
@@ -2074,11 +2059,12 @@ export class TelegramChannel implements Channel {
             status.push(`❌ ${ev.message}`);
             trace.events.push({ ts: Date.now(), type: "error", message: ev.message });
           }
+          // tool_use, tool_result, text intentionally ignored — hook driven.
         }
       })();
 
       const meta = await handle.done;
-      await watcher; // make sure all events are reflected
+      await drainer; // make sure all session_id / image events flushed
       if (meta.error) console.error("[telegram] route run failed:", meta.error);
       const finalText =
         meta.output?.trim() ||
@@ -2170,6 +2156,7 @@ export class TelegramChannel implements Channel {
     } finally {
       stopTyping();
       unmute();
+      turnsRegistry.remove(turn);
     }
   }
 

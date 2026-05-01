@@ -142,6 +142,27 @@ export function renderTranscriptMarkdown(ai: AiSession, detail: SessionDetail): 
   return header + body;
 }
 
+// Pull the "intro" out of a SKILL.md body — frontmatter, the H1, and
+// everything up to the first second-level heading (## ...). Used by
+// /<skill> with no args to show the user a digest of what the skill does
+// without dumping the full file (which can be hundreds of lines).
+export function extractSkillIntro(body: string): string {
+  // Strip frontmatter (--- ... ---).
+  let s = body;
+  if (s.startsWith("---")) {
+    const end = s.indexOf("\n---", 3);
+    if (end > 0) s = s.slice(end + 4).replace(/^\r?\n/, "");
+  }
+  // Truncate at first ## (second-level heading).
+  const idx = s.search(/\n##\s+/);
+  if (idx > 0) s = s.slice(0, idx);
+  // Collapse triple+ blank lines and cap to ~1500 chars so a chatty intro
+  // doesn't blow Telegram's per-message limit.
+  s = s.replace(/\n{3,}/g, "\n\n").trim();
+  if (s.length > 1500) s = s.slice(0, 1497) + "…";
+  return s;
+}
+
 // Single-line preview suitable for confirmation/echo messages. Collapses
 // whitespace so a multiline input shows as one bubble line, then trims to
 // the requested character cap with an ellipsis.

@@ -28,6 +28,7 @@ import {
   shortStamp,
   stringifyOutput,
   truncateForPreview,
+  extractSkillIntro,
   chunk,
   sleep,
 } from "./telegram-utils.js";
@@ -1215,15 +1216,39 @@ export class TelegramChannel implements Channel {
       return true;
     }
 
-    // Skill-as-slash-command dispatch. /<skill_name> [args] runs the bound
-    // session with a prompt that points at the skill's absolute SKILL.md
-    // path. Works regardless of whether /skills on advertises the command —
-    // direct typing always dispatches.
+    // Skill-as-slash-command dispatch. /<skill_name> with no args shows
+    // the skill's header (description + intro paragraph) so the user can
+    // see what it does without running it. /<skill_name> <args> routes a
+    // turn to the bound session with the skill's absolute SKILL.md path.
+    // Direct typing of either form works regardless of /skills on/off.
     const skillName = cmd.slice(1).split("@")[0]; // strip @botname suffix
     const ai = aiStore.findByTelegramChat(chatId);
     const cwd = ai?.cwd ?? workspaceDir();
     const skill = findSkillByCommand(cwd, skillName);
     if (skill) {
+      const skillArgs = arg.trim();
+      // No-arg → show header. Cheap "what does this skill do" affordance
+      // without the LLM round-trip.
+      if (!skillArgs) {
+        const { readFileSync } = await import("node:fs");
+        let intro = "";
+        try {
+          intro = extractSkillIntro(readFileSync(skill.path, "utf8"));
+        } catch (e: any) {
+          intro = `(failed to read SKILL.md: ${e?.message ?? e})`;
+        }
+        const blocks = [
+          `**${skill.name}** — /${skillName}`,
+          skill.description,
+          "",
+          intro,
+          "",
+          `To run: \`/${skillName} <args>\``,
+        ].filter(Boolean);
+        await this.send({ chatId }, { text: blocks.join("\n") });
+        return true;
+      }
+      // With args → run.
       if (!ai) {
         await api.sendMessage({
           chat_id: chatId,
@@ -1231,16 +1256,14 @@ export class TelegramChannel implements Channel {
         });
         return true;
       }
-      const skillArgs = arg.trim();
       const promptParts = [
         `Run the \`${skill.name}\` skill (full instructions at ${skill.path}).`,
+        "",
+        "User arguments:",
+        skillArgs,
+        "",
+        "Read the SKILL.md file first if you don't already know its contract, then execute.",
       ];
-      if (skillArgs) {
-        promptParts.push("", "User arguments:", skillArgs);
-      } else {
-        promptParts.push("", "(no arguments — read the skill's defaults / usage section)");
-      }
-      promptParts.push("", "Read the SKILL.md file first if you don't already know its contract, then execute.");
       await this.routeToSession(ai.id, promptParts.join("\n"), chatId, []);
       return true;
     }

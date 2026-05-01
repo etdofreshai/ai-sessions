@@ -20,8 +20,6 @@ import {
   sleep,
 } from "./telegram-utils.js";
 import { downloadTelegramFile } from "./telegram-download.js";
-import * as remoteControl from "./remote-control.js";
-import * as sessionWatcher from "./session-watcher.js";
 import { transcribe } from "./stt.js";
 import type { Attachment } from "../providers/types.js";
 import {
@@ -40,28 +38,21 @@ const PAGE_SIZE = 5;
 const SLASH_COMMANDS = [
   { command: "help", description: "List available commands" },
   { command: "status", description: "Show this chat's bound session" },
-  { command: "bind", description: "(Re)bind this chat to a Session" },
-  { command: "unbind", description: "Remove this chat's binding from its Session" },
-  { command: "new", description: "Start a new session: /new [<provider>] [<cwd>] (both inherit the current binding)" },
+  { command: "bind", description: "Bind this chat to a Session: /bind | /bind off" },
+  { command: "new", description: "Start a new session: /new [<provider>] [<cwd>]" },
   { command: "fork", description: "Fork the bound session to another provider: /fork <provider>" },
-  { command: "remote", description: "Toggle claude remote-control: /remote [true|false]" },
   { command: "effort", description: "Set reasoning effort: /effort [low|medium|high|xhigh]" },
-  { command: "watch", description: "Mirror new session entries to chat: /watch [<duration>|on|off|status]" },
-  { command: "unwatch", description: "Alias for /watch off" },
   { command: "cwd", description: "Show or set the bound session's cwd" },
   { command: "rename", description: "Rename the bound session (no arg = auto-summarize)" },
   { command: "skills", description: "List enabled skills in the workspace" },
-  { command: "interrupt", description: "Interrupt the current run on this session" },
-  { command: "stop", description: "Alias for /interrupt" },
+  { command: "stop", description: "Interrupt the current run on this session" },
   { command: "trace", description: "Show full detail of the last run (tools, inputs, outputs, reply)" },
   { command: "export", description: "Export the bound session's transcript as Markdown" },
-  { command: "agent", description: "Run a one-shot sub-agent: /agent [<provider>] prompt" },
   { command: "btw", description: "Side question with full chat context, doesn't touch the bound session" },
   { command: "usage", description: "Show rate-limit usage across providers (5h / weekly windows)" },
   { command: "cron", description: "Manage scheduled prompts on this chat: /cron add|ls|rm" },
-  { command: "sha", description: "Show server's git commit, or git status of a path: /sha [<relative-or-absolute-dir>]" },
-  { command: "resume", description: "Auto-continue session when bg tasks finish: /resume | /resume on | /resume off" },
-  { command: "ls", description: "List files in a directory on the server: /ls [<relative-or-absolute-dir>]" },
+  { command: "version", description: "Show server's git commit, or git status of a path: /version [<dir>]" },
+  { command: "ls", description: "List files in a directory on the server: /ls [<dir>]" },
 ];
 
 interface PendingBinding {
@@ -180,8 +171,6 @@ export class TelegramChannel implements Channel {
     const me = await api.getMe();
     console.log(`[telegram] bot online as @${me.username ?? me.id}`);
     // Advertise slash commands in the bot menu. Best-effort — don't block start.
-    remoteControl.installShutdownHook();
-    this.restoreWatchers();
     api
       .setMyCommands({ commands: SLASH_COMMANDS })
       .catch((e: any) => console.error("[telegram] setMyCommands failed:", e?.message ?? e));
@@ -195,7 +184,6 @@ export class TelegramChannel implements Channel {
 
   async stop(): Promise<void> {
     this.polling = false;
-    sessionWatcher.stopAll();
   }
 
   async send(address: ChannelAddress, msg: ChannelMessage): Promise<void> {
@@ -534,29 +522,30 @@ export class TelegramChannel implements Channel {
     }
 
     if (cmd === "/bind") {
-      // Don't drop the existing binding up-front — picking a new session will
-      // replace it, and cancel keeps the current one intact.
+      // /bind off — drop the chat's existing binding (replaces the old
+      // /unbind command).
+      if (arg.trim().toLowerCase() === "off") {
+        const ai = aiStore.findByTelegramChat(chatId);
+        if (!ai) {
+          await api.sendMessage({ chat_id: chatId, text: "Not bound." });
+          return true;
+        }
+        ai.channels = { ...(ai.channels ?? {}) };
+        delete ai.channels.telegram;
+        aiStore.write(ai);
+        this.pending.delete(chatId);
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `Unbound from Session ${ai.id.slice(0, 8)} (${ai.provider}${ai.name ? ` · ${ai.name}` : ""}).`,
+        });
+        return true;
+      }
+      // Default: open the binding picker. Don't drop the existing binding
+      // up-front — picking a new session will replace it, and cancel keeps
+      // the current one intact.
       this.pending.delete(chatId);
       const alreadyBound = aiStore.findByTelegramChat(chatId) != null;
       await this.sendBindingPicker(chatId, { showCancel: alreadyBound });
-      return true;
-    }
-
-    if (cmd === "/unbind") {
-      const ai = aiStore.findByTelegramChat(chatId);
-      if (!ai) {
-        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
-        return true;
-      }
-      sessionWatcher.stop(ai.id);
-      ai.channels = { ...(ai.channels ?? {}) };
-      delete ai.channels.telegram;
-      aiStore.write(ai);
-      this.pending.delete(chatId);
-      await api.sendMessage({
-        chat_id: chatId,
-        text: `Unbound from Session ${ai.id.slice(0, 8)} (${ai.provider}${ai.name ? ` · ${ai.name}` : ""}).`,
-      });
       return true;
     }
 
@@ -612,53 +601,6 @@ export class TelegramChannel implements Channel {
       return true;
     }
 
-    if (cmd === "/remote") {
-      const ai = aiStore.findByTelegramChat(chatId);
-      if (!ai) {
-        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
-        return true;
-      }
-      if (ai.provider !== "claude") {
-        await api.sendMessage({
-          chat_id: chatId,
-          text: `Remote-control only works for claude sessions; this one is ${ai.provider}.`,
-        });
-        return true;
-      }
-      const a = arg.trim().toLowerCase();
-      if (!a) {
-        const running = remoteControl.isRunning(ai.id);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: running ? "Remote-control: ENABLED" : "Remote-control: disabled",
-        });
-        return true;
-      }
-      if (a === "true" || a === "on" || a === "1") {
-        const r = remoteControl.start(ai);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: r.ok
-            ? `Remote-control enabled (pid ${r.pid}). Log: ${r.logPath}`
-            : `Failed to enable: ${r.error}`,
-        });
-        return true;
-      }
-      if (a === "false" || a === "off" || a === "0") {
-        const stopped = remoteControl.stop(ai.id);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: stopped ? "Remote-control disabled." : "Remote-control was not running.",
-        });
-        return true;
-      }
-      await api.sendMessage({
-        chat_id: chatId,
-        text: "Usage: /remote [true|false]",
-      });
-      return true;
-    }
-
     if (cmd === "/effort") {
       const ai = aiStore.findByTelegramChat(chatId);
       if (!ai) {
@@ -684,69 +626,6 @@ export class TelegramChannel implements Channel {
       ai.reasoningEffort = a;
       aiStore.write(ai);
       await api.sendMessage({ chat_id: chatId, text: `Reasoning effort set to: ${a}` });
-      return true;
-    }
-
-    if (cmd === "/watch") {
-      const ai = aiStore.findByTelegramChat(chatId);
-      if (!ai) {
-        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
-        return true;
-      }
-      const token = arg.trim().toLowerCase();
-
-      if (token === "" || token === "status" || token === "info" || token === "?") {
-        const text = this.formatWatchStatus(ai);
-        await api.sendMessage({ chat_id: chatId, text });
-        return true;
-      }
-
-      if (token === "off") {
-        sessionWatcher.stop(ai.id);
-        ai.watch = false;
-        ai.watchStartedAt = undefined;
-        aiStore.write(ai);
-        await api.sendMessage({ chat_id: chatId, text: "Stopped watching." });
-        return true;
-      }
-
-      if (token === "on") {
-        const r = await sessionWatcher.start(ai, this.makeForwardFn(chatId));
-        if (!r.ok) {
-          await api.sendMessage({ chat_id: chatId, text: `Watch failed: ${r.error}` });
-          return true;
-        }
-        const wasOff = ai.watch !== true;
-        ai.watch = true;
-        if (wasOff || !ai.watchStartedAt) {
-          ai.watchStartedAt = new Date().toISOString();
-        }
-        aiStore.write(ai);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: "Watching — /watch off to stop, /watch for status.",
-        });
-        return true;
-      }
-
-      await api.sendMessage({
-        chat_id: chatId,
-        text: "Usage: /watch | /watch on | /watch off",
-      });
-      return true;
-    }
-
-    if (cmd === "/unwatch") {
-      const ai = aiStore.findByTelegramChat(chatId);
-      if (!ai) {
-        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
-        return true;
-      }
-      sessionWatcher.stop(ai.id);
-      ai.watch = false;
-      ai.watchStartedAt = undefined;
-      aiStore.write(ai);
-      await api.sendMessage({ chat_id: chatId, text: "Stopped watching." });
       return true;
     }
 
@@ -908,9 +787,9 @@ export class TelegramChannel implements Channel {
       return true;
     }
 
-    if (cmd === "/agent" || cmd === "/btw") {
-      const which = cmd.slice(1) as "agent" | "btw";
-      const tail = text.replace(new RegExp(`^/${which}(?:@\\w+)?\\s*`, "i"), "");
+    if (cmd === "/btw") {
+      const which = "btw" as const;
+      const tail = text.replace(/^\/btw(?:@\w+)?\s*/i, "");
       const provMatch = tail.match(/^<([^>]+)>\s*([\s\S]*)$/);
       const bound = aiStore.findByTelegramChat(chatId);
       const provider = (provMatch?.[1].trim() || bound?.provider || "claude").toLowerCase();
@@ -934,14 +813,13 @@ export class TelegramChannel implements Channel {
         });
         return true;
       }
-      // Telegram-layer policy: front-load the bound session's transcript so
-      // the sub-agent has context. /agent pipes its exchange back into the
-      // bound session; /btw doesn't.
+      // /btw front-loads the bound session's transcript so the side agent
+      // has context, but doesn't pipe its reply back into the session.
       const fullPrompt = await this.buildTranscriptPrefixedPrompt(bound, userPrompt);
       void this.runSubAgent(chatId, provider, fullPrompt, attachments, bound ?? undefined, {
         label: which,
         displayPrompt: userPrompt || "(see attachments)",
-        pipeBack: which === "agent",
+        pipeBack: false,
         fallbackPromptBuilder: bound?.sessionId
           ? () => this.buildSummarizedPrompt(bound, userPrompt)
           : undefined,
@@ -1072,41 +950,7 @@ export class TelegramChannel implements Channel {
       return true;
     }
 
-    if (cmd === "/resume") {
-      const ai = aiStore.findByTelegramChat(chatId);
-      if (!ai) {
-        await api.sendMessage({ chat_id: chatId, text: "Not bound." });
-        return true;
-      }
-      const token = arg.trim().toLowerCase();
-      const { enableResume, disableResume } = await import("../resume/state.js");
-
-      if (token === "on") {
-        enableResume(ai);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: "Resume on — bg tasks launched in this session will auto-continue when they finish. Auto-off after 60m of silence.",
-        });
-        return true;
-      }
-      if (token === "off") {
-        disableResume(ai);
-        await api.sendMessage({ chat_id: chatId, text: "Resume off." });
-        return true;
-      }
-      if (token === "" || token === "status" || token === "?") {
-        const text = this.formatResumeStatus(ai);
-        await api.sendMessage({ chat_id: chatId, text });
-        return true;
-      }
-      await api.sendMessage({
-        chat_id: chatId,
-        text: "Usage: /resume | /resume on | /resume off",
-      });
-      return true;
-    }
-
-    if (cmd === "/sha") {
+    if (cmd === "/version" || cmd === "/sha") {
       const target = arg.trim();
       // No arg → server build SHA from baked env / runtime detection.
       if (!target) {
@@ -1285,7 +1129,7 @@ export class TelegramChannel implements Channel {
       return true;
     }
 
-    if (cmd === "/interrupt" || cmd === "/stop") {
+    if (cmd === "/stop") {
       const ai = aiStore.findByTelegramChat(chatId);
       if (!ai) {
         await api.sendMessage({ chat_id: chatId, text: "Not bound." });
@@ -1891,130 +1735,6 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  // Builds the forwarder used by session-watcher: pretty-prints role+text
-  // and pushes it to the bound chat. Long messages are chunked by send().
-  private formatResumeStatus(ai: AiSession): string {
-    const fmt = (ms: number): string => {
-      if (ms < 60_000) return `${Math.max(0, Math.round(ms / 1000))}s`;
-      if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)}m`;
-      return `${(ms / (60 * 60_000)).toFixed(1)}h`;
-    };
-    const lines: string[] = [];
-    if (ai.resume !== true) {
-      lines.push("Mode:    off");
-      lines.push("(no auto-continue on bg task completion)");
-      return lines.join("\n");
-    }
-    lines.push("Mode:    on");
-    if (ai.resumeStartedAt) {
-      const ms = Date.now() - new Date(ai.resumeStartedAt).getTime();
-      lines.push(`Started: ${ai.resumeStartedAt} (${fmt(ms)} ago)`);
-    }
-    if (ai.resumeUntil) {
-      const ms = new Date(ai.resumeUntil).getTime() - Date.now();
-      const rel = ms > 0 ? `in ${fmt(ms)}` : `expired ${fmt(-ms)} ago`;
-      lines.push(`Expires: ${rel} (${ai.resumeUntil})`);
-    }
-    const pending = ai.resumePendingTasks ?? [];
-    lines.push("");
-    lines.push(`Pending bg tasks: ${pending.length}`);
-    for (const t of pending) {
-      const age = fmt(Date.now() - new Date(t.launchedAt).getTime());
-      lines.push(`  ${t.kind} ${t.id}  (launched ${age} ago)${t.label ? `  — ${t.label}` : ""}`);
-    }
-    return lines.join("\n");
-  }
-
-  private formatWatchStatus(ai: AiSession): string {
-    const fmt = (ms: number): string => {
-      if (ms < 60_000) return `${Math.max(0, Math.round(ms / 1000))}s`;
-      if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)}m`;
-      return `${(ms / (60 * 60_000)).toFixed(1)}h`;
-    };
-    const lines: string[] = [];
-
-    lines.push(`Mode:    ${ai.watch === true ? "on" : "off"}`);
-    if (ai.watchStartedAt) {
-      const ms = Date.now() - new Date(ai.watchStartedAt).getTime();
-      lines.push(`Started: ${ai.watchStartedAt} (${fmt(ms)} ago)`);
-    }
-
-    // Live watcher state.
-    const status = sessionWatcher.getStatus(ai.id);
-    if (!status) {
-      lines.push("Running:  no (no in-process watcher)");
-    } else {
-      lines.push(`Running:  yes${status.muted ? " (muted — route turn in flight)" : ""}`);
-      lines.push(
-        `Lag:      ${
-          status.caughtUp ? "0 bytes (caught up)" : `${status.lagBytes} bytes behind`
-        }`,
-      );
-    }
-
-    const preview = (s: string): string => {
-      const oneLine = s.replace(/\s+/g, " ").trim();
-      return oneLine.length > 120 ? oneLine.slice(0, 117) + "…" : oneLine;
-    };
-
-    lines.push("");
-    lines.push("Last sent to Telegram:");
-    if (ai.lastBotMessageAt && ai.lastBotMessagePreview) {
-      lines.push(`  ${ai.lastBotMessageAt}`);
-      lines.push(`    "${preview(ai.lastBotMessagePreview)}"`);
-    } else {
-      lines.push("  (nothing tracked yet — only set on route turns / forwards since the last redeploy)");
-    }
-
-    lines.push("");
-    lines.push("Last entry on disk:");
-    const tail = status ? sessionWatcher.readLatestEntry(status.path) : null;
-    if (tail) {
-      const role = tail.role === "user" ? "👤" : "🤖";
-      lines.push(`  ${role}  ${tail.timestamp ?? "(no timestamp)"}`);
-      lines.push(`    "${preview(tail.preview)}"`);
-    } else if (status) {
-      lines.push("  (no parseable user/assistant entry)");
-    } else {
-      lines.push("  (watcher not running — can't tail)");
-    }
-    return lines.join("\n");
-  }
-
-  private makeForwardFn(chatId: number): sessionWatcher.ForwardFn {
-    return (role, text) => {
-      const prefix = role === "user" ? "👤" : "🤖";
-      void this.send({ chatId }, { text: `${prefix} ${text}` });
-      void (async () => {
-        try {
-          const ai = aiStore.findByTelegramChat(chatId);
-          if (!ai) return;
-          ai.lastBotMessageAt = new Date().toISOString();
-          ai.lastBotMessagePreview = `${prefix} ${text}`.slice(0, 240);
-          // External provider activity slides the resume TTL too.
-          if (ai.resume === true) {
-            const { slideResume } = await import("../resume/state.js");
-            slideResume(ai); // persists
-          } else {
-            aiStore.write(ai);
-          }
-        } catch (e) {
-          console.error("[telegram] forward persist failed:", e);
-        }
-      })();
-    };
-  }
-
-  // On startup, resume watchers for every AiSession that opted in via /watch.
-  private restoreWatchers(): void {
-    for (const ai of aiStore.list()) {
-      if (!ai.watch) continue;
-      const chatId = ai.channels?.telegram?.chatId;
-      if (!chatId) continue;
-      void sessionWatcher.start(ai, this.makeForwardFn(chatId));
-    }
-  }
-
   // Look up the human-readable name for a chat id (group title or user first
   // name), with an in-memory cache. Returns "" if it can't be resolved.
   private async resolveChatName(chatId: number): Promise<string> {
@@ -2148,9 +1868,6 @@ export class TelegramChannel implements Channel {
       events: [],
     };
     this.lastTrace.set(chatId, trace);
-    // Suppress the watcher for the duration of this run — anything our run
-    // appends to the JSONL will already be shown via the status block.
-    const unmute = sessionWatcher.mute(ai.id);
     // Register an active turn so PreToolUse/PostToolUse hooks know which
     // status bubble + trace to drive. Hooks are the only source of
     // intermediate UI now — we stop iterating tool/text events from the
@@ -2291,17 +2008,7 @@ export class TelegramChannel implements Channel {
         if (fresh) {
           fresh.lastBotMessageAt = new Date().toISOString();
           fresh.lastBotMessagePreview = finalText.slice(0, 240);
-          // Resume default-on: any chat-bound session whose resume state has
-          // never been set gets it enabled on the first route turn. After
-          // that, slide the TTL on every assistant response.
-          const { enableResume, slideResume } = await import("../resume/state.js");
-          if (fresh.resume === undefined) {
-            enableResume(fresh);
-          } else if (fresh.resume === true) {
-            slideResume(fresh);
-          } else {
-            aiStore.write(fresh);
-          }
+          aiStore.write(fresh);
         }
       } catch (e) {
         console.error("[telegram] post-route persist failed:", e);
@@ -2313,7 +2020,6 @@ export class TelegramChannel implements Channel {
       await status.finalize(`Error: ${e?.message ?? e}`);
     } finally {
       stopTyping();
-      unmute();
       turnsRegistry.remove(turn);
     }
   }

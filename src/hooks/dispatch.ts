@@ -1,6 +1,4 @@
 import * as turns from "../turns/registry.js";
-import { detectBgLaunch } from "../resume/detect.js";
-import { recordPendingTask } from "../resume/state.js";
 import { formatToolInput } from "../channels/telegram-utils.js";
 import * as subStore from "../sub-agents/store.js";
 
@@ -103,18 +101,4 @@ function handlePostToolUse(
     name: prefix ? `sub:${toolName}` : toolName,
     output: toolOutput,
   });
-
-  // Capture backgrounded launches so the resume poller can pick up the
-  // result when the bg task finishes. The detector already knows both
-  // Bash(run_in_background:true) and Agent(run_in_background:true) shapes.
-  try {
-    const bgTask = detectBgLaunch({
-      toolName,
-      toolInput,
-      toolOutput,
-    });
-    if (bgTask) recordPendingTask(turn.aiSessionId, bgTask);
-  } catch (e) {
-    console.error("[hooks] bg-task capture failed:", e);
-  }
 }

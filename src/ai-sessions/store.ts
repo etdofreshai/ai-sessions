@@ -4,15 +4,19 @@ import { randomUUID } from "node:crypto";
 import { dataDir } from "../config.js";
 import { ensureDir } from "../fsutil.js";
 import { db } from "../db/index.js";
-import type { AiSession, ResumeBgTask, SessionChannelBindings } from "./types.js";
+import type { AiSession, SessionChannelBindings } from "./types.js";
 
 export function newAiSessionId(): string {
   return randomUUID();
 }
 
 // Two-way mapper between the AiSession TS shape and SQL row shape. JSON-blob
-// columns hold sub-structures we don't query inside SQL (channels +
-// resumePendingTasks).
+// columns (channels) hold sub-structures we don't query inside SQL.
+//
+// Legacy watch_*/resume_* columns from earlier feature flags are still on
+// the table but no longer mapped — we read NULL out of them and write NULL
+// back, so existing rows continue to round-trip cleanly without forcing a
+// schema migration. They can be dropped in a follow-up migration.
 interface Row {
   id: string;
   name: string | null;
@@ -22,12 +26,6 @@ interface Row {
   model: string | null;
   reasoning_effort: string | null;
   channels_json: string | null;
-  watch: number | null;
-  watch_started_at: string | null;
-  resume: number | null;
-  resume_started_at: string | null;
-  resume_until: string | null;
-  resume_pending_tasks_json: string | null;
   last_bot_message_at: string | null;
   last_bot_message_preview: string | null;
   created_at: string;
@@ -46,14 +44,6 @@ function fromRow(r: Row): AiSession {
     channels: r.channels_json
       ? (JSON.parse(r.channels_json) as SessionChannelBindings)
       : undefined,
-    watch: r.watch == null ? undefined : Boolean(r.watch),
-    watchStartedAt: r.watch_started_at ?? undefined,
-    resume: r.resume == null ? undefined : Boolean(r.resume),
-    resumeStartedAt: r.resume_started_at ?? undefined,
-    resumeUntil: r.resume_until ?? undefined,
-    resumePendingTasks: r.resume_pending_tasks_json
-      ? (JSON.parse(r.resume_pending_tasks_json) as ResumeBgTask[])
-      : undefined,
     lastBotMessageAt: r.last_bot_message_at ?? undefined,
     lastBotMessagePreview: r.last_bot_message_preview ?? undefined,
     createdAt: r.created_at,
@@ -71,14 +61,6 @@ function toRow(s: AiSession): Row {
     model: s.model ?? null,
     reasoning_effort: s.reasoningEffort ?? null,
     channels_json: s.channels ? JSON.stringify(s.channels) : null,
-    watch: s.watch == null ? null : s.watch ? 1 : 0,
-    watch_started_at: s.watchStartedAt ?? null,
-    resume: s.resume == null ? null : s.resume ? 1 : 0,
-    resume_started_at: s.resumeStartedAt ?? null,
-    resume_until: s.resumeUntil ?? null,
-    resume_pending_tasks_json: s.resumePendingTasks
-      ? JSON.stringify(s.resumePendingTasks)
-      : null,
     last_bot_message_at: s.lastBotMessageAt ?? null,
     last_bot_message_preview: s.lastBotMessagePreview ?? null,
     created_at: s.createdAt,

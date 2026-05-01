@@ -14,6 +14,7 @@ interface Row {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  last_activity_at: string | null;
   result_summary: string | null;
 }
 
@@ -30,6 +31,7 @@ function fromRow(r: Row): SubAgent {
     createdAt: r.created_at,
     startedAt: r.started_at ?? undefined,
     finishedAt: r.finished_at ?? undefined,
+    lastActivityAt: r.last_activity_at ?? undefined,
     resultSummary: r.result_summary ?? undefined,
   };
 }
@@ -118,6 +120,12 @@ export function setStatus(id: string, status: SubAgentStatus): void {
   } else {
     db().prepare(`UPDATE sub_agents SET status = ? WHERE id = ?`).run(status, id);
   }
+}
+
+export function touchActivity(id: string): void {
+  db().prepare(
+    `UPDATE sub_agents SET last_activity_at = ? WHERE id = ?`,
+  ).run(new Date().toISOString(), id);
 }
 
 export function setResultSummary(id: string, summary: string): void {

@@ -182,4 +182,12 @@ export const migrations: string[] = [
     value TEXT
   );
   `,
+
+  // 7. sub_agents.last_activity_at — bumped on every event we observe from
+  // the child run (session_id bind, hook PreToolUse/PostToolUse, image,
+  // error). Lets the /subagents skill compute a stall heuristic without
+  // having to crawl run_events.
+  `
+  ALTER TABLE sub_agents ADD COLUMN last_activity_at TEXT;
+  `,
 ];

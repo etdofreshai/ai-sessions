@@ -26,6 +26,10 @@ export interface SubAgent {
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;
+  // Bumped on every event observed from the child run — used to compute a
+  // stall heuristic ("running but silent for N minutes") without crawling
+  // run_events.
+  lastActivityAt?: string;
   // Short (≤ ~240 chars) summary of the final reply for status displays.
   // The full transcript stays in the child's session jsonl.
   resultSummary?: string;

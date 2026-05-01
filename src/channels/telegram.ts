@@ -1967,16 +1967,8 @@ export class TelegramChannel implements Channel {
     if (inFlight && inFlight.handle?.steer && trimmed && !attachments.length) {
       try {
         await inFlight.handle.steer(trimmed);
-        // Two-step ack: a line on the in-flight bubble for tight context,
-        // plus a separate confirmation message so it's still visible after
-        // the bubble swaps to the final reply. Truncate the preview so a
-        // long steered prompt doesn't dominate the chat.
         const preview = truncateForPreview(trimmed, 120);
         inFlight.status.push(`✏️ steer: ${preview}`);
-        await this.api.sendMessage({
-          chat_id: chatId,
-          text: `✏️ Conversation steered: ${preview}`,
-        });
         return;
       } catch (e: any) {
         console.error("[telegram] steer failed; falling back to new turn:", e?.message ?? e);

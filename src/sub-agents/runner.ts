@@ -71,6 +71,27 @@ export async function startSubAgent(args: StartSubAgentArgs): Promise<SubAgent> 
   return sub;
 }
 
+// Cancel a running/pending sub-agent. Resolves the child's ActiveTurn
+// (registered in runChild) and calls handle.interrupt() so the provider
+// tears the run down cleanly; runChild's drain then sets the row to
+// "cancelled" via terminal-status mapping. Falls back to flipping the
+// status directly when no live handle exists (e.g. server restarted).
+export function cancelSubAgent(id: string): boolean {
+  const sub = subStore.read(id);
+  if (!sub) return false;
+  const turn = turnsRegistry.getByAiSession(sub.childAiSessionId);
+  if (turn?.handle?.interrupt) {
+    try {
+      void turn.handle.interrupt();
+    } catch (e: any) {
+      console.error(`[sub-agents] ${id} interrupt failed:`, e?.message ?? e);
+    }
+    return true;
+  }
+  subStore.setStatus(id, "cancelled");
+  return true;
+}
+
 async function runChild(
   subId: string,
   childAiSessionId: string,
@@ -134,6 +155,10 @@ async function runChild(
     yolo: true,
     effort: child.reasoningEffort,
   });
+  // Stash the run handle on the ActiveTurn so /sub-agents/:id/cancel can
+  // resolve child aiSessionId → turn → handle.interrupt().
+  if (turn) turn.handle = handle;
+  subStore.touchActivity(subId);
 
   // Single-consumer drain: bind providerSessionId on the first session_id
   // event, render image events, log error events. Tool events come via
@@ -142,6 +167,7 @@ async function runChild(
   // events stream would be split between two consumers and bind events
   // could be missed.
   for await (const ev of handle.events) {
+    subStore.touchActivity(subId);
     if (ev.type === "session_id") {
       subStore.bindProviderSession(subId, ev.sessionId);
       if (turn) turnsRegistry.bindProviderSession(turn.aiSessionId, ev.sessionId);
@@ -192,7 +218,7 @@ async function runChild(
   // so the user can scroll it back later. Best-effort — don't let a
   // telegram failure block parent injection below.
   if (status && subRow) {
-    const header = `🤖 sub-agent ${subRow.id.slice(0, 8)}${subRow.label ? ` (${subRow.label})` : ""}: ${meta.status}`;
+    const header = `🤖 sub-agent ${subRow.id.slice(0, 8)}${subRow.label ? ` (${subRow.label})` : ""} · ${child.provider}: ${meta.status}`;
     try {
       await status.finalize(`${header}\n\n${resultText}`);
     } catch (e: any) {

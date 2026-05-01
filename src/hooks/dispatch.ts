@@ -31,10 +31,15 @@ export function dispatchHook(args: {
   // tell the child's activity apart from the parent's own. Non-empty only
   // when we resolved this hook through the parent ↔ sub-agents mapping.
   let prefix = "";
+  // Bump sub-agent activity timestamp on every observed hook so the stall
+  // heuristic in /sub-agents responses stays current — even when the parent
+  // turn isn't in the foreground anymore.
+  const subForActivity = subStore.findByChildProviderSession(sessionId);
+  if (subForActivity) subStore.touchActivity(subForActivity.id);
   if (!turn) {
     // No direct match — maybe this is a sub-agent we spawned through the
     // outer harness. Resolve to the parent's ActiveTurn and prefix lines.
-    const sub = subStore.findByChildProviderSession(sessionId);
+    const sub = subForActivity;
     if (sub) {
       const parentTurn = turns.getByAiSession(sub.parentAiSessionId);
       if (parentTurn) {

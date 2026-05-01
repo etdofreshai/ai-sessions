@@ -22,6 +22,29 @@ import { getUsage } from "../usage/index.js";
 import { VERSION, GIT } from "../version.js";
 import * as hookStore from "../hooks/store.js";
 import { dispatchHook } from "../hooks/dispatch.js";
+import type { SubAgent } from "../sub-agents/types.js";
+
+// Stall threshold for the running-but-silent heuristic. 5 minutes covers a
+// long Bash + a reasoning step but flags genuinely stuck runs. Tunable via
+// AI_SESSIONS_SUBAGENT_STALL_MS if a workload needs different bounds.
+const SUBAGENT_STALL_MS = Number(process.env.AI_SESSIONS_SUBAGENT_STALL_MS ?? 5 * 60 * 1000);
+
+function decorate(sub: SubAgent): SubAgent & {
+  durationMs: number | null;
+  idleMs: number | null;
+  stalled: boolean;
+} {
+  const now = Date.now();
+  const startMs = sub.startedAt ? Date.parse(sub.startedAt) : null;
+  const endMs = sub.finishedAt ? Date.parse(sub.finishedAt) : null;
+  const lastMs = sub.lastActivityAt ? Date.parse(sub.lastActivityAt) : startMs;
+  const durationMs =
+    startMs != null ? (endMs ?? now) - startMs : null;
+  const idleMs =
+    sub.status === "running" && lastMs != null ? now - lastMs : null;
+  const stalled = sub.status === "running" && (idleMs ?? 0) > SUBAGENT_STALL_MS;
+  return { ...sub, durationMs, idleMs, stalled };
+}
 
 export function createApp() {
   const app = express();
@@ -388,7 +411,7 @@ export function createApp() {
       if (!parentAiSessionId) {
         return res.status(400).json({ error: "?parent=<ai-session-id> required" });
       }
-      res.json(subStore.listByParent(parentAiSessionId));
+      res.json(subStore.listByParent(parentAiSessionId).map(decorate));
     } catch (e) {
       next(e);
     }
@@ -399,7 +422,26 @@ export function createApp() {
       const subStore = await import("../sub-agents/store.js");
       const sub = subStore.read(req.params.id);
       if (!sub) return res.status(404).json({ error: "sub-agent not found" });
-      res.json(sub);
+      res.json(decorate(sub));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Cancel a running/pending sub-agent: interrupt the child's run handle if
+  // it's registered and mark the row cancelled. The runner's drain loop
+  // observes the abort and finalizes the bubble normally.
+  app.post("/sub-agents/:id/cancel", async (req, res, next) => {
+    try {
+      const subStore = await import("../sub-agents/store.js");
+      const { cancelSubAgent } = await import("../sub-agents/runner.js");
+      const sub = subStore.read(req.params.id);
+      if (!sub) return res.status(404).json({ error: "sub-agent not found" });
+      if (sub.status !== "running" && sub.status !== "pending") {
+        return res.status(409).json({ error: `sub-agent already ${sub.status}` });
+      }
+      const ok = cancelSubAgent(sub.id);
+      res.json({ ok, status: subStore.read(sub.id)?.status });
     } catch (e) {
       next(e);
     }

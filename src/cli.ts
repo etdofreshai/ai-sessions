@@ -402,6 +402,91 @@ program
     for (const s of snaps) console.log(formatUsage(s));
   });
 
+const jobs = program.command("jobs").description("Manage long-running jobs (worker runs inside `ais serve`)");
+
+jobs
+  .command("start <kind>")
+  .description("Enqueue a job. Kinds: bash")
+  .option("--cmd <cmd>", "shell command (kind=bash)")
+  .option("--cwd <dir>", "working directory (kind=bash)")
+  .option("--timeout-ms <n>", "kill after N ms (kind=bash); omit for unbounded", (v) => parseInt(v, 10))
+  .option("--label <s>", "human-friendly label for status displays")
+  .option("--ai-session <id>", "inject result into this AiSession when the job lands")
+  .option("--chat-id <n>", "post a heads-up to this Telegram chat too", (v) => parseInt(v, 10))
+  .option("--json", "print the full job row instead of just the id")
+  .action(async (kind: string, opts: any) => {
+    const jobsStore = await import("./jobs/store.js");
+    if (kind !== "bash") {
+      console.error(`unknown kind: ${kind} (supported: bash)`);
+      process.exit(1);
+    }
+    if (!opts.cmd) {
+      console.error("kind=bash requires --cmd");
+      process.exit(1);
+    }
+    const job = jobsStore.create({
+      kind: "bash",
+      payload: { kind: "bash", cmd: opts.cmd, cwd: opts.cwd, timeoutMs: opts.timeoutMs },
+      label: opts.label,
+      aiSessionId: opts.aiSession,
+      chatId: opts.chatId,
+    });
+    if (opts.json) console.log(JSON.stringify(job, null, 2));
+    else console.log(job.id);
+  });
+
+jobs
+  .command("ls")
+  .description("List recent jobs")
+  .option("-s, --status <status>", "filter: pending|running|succeeded|failed|cancelled")
+  .option("--ai-session <id>", "filter by AiSession")
+  .option("-l, --limit <n>", "max rows", (v) => parseInt(v, 10), 20)
+  .option("--json", "output JSON")
+  .action(async (opts: any) => {
+    const jobsStore = await import("./jobs/store.js");
+    const all = jobsStore.list({
+      status: opts.status,
+      aiSessionId: opts.aiSession,
+      limit: opts.limit,
+    });
+    if (opts.json) {
+      console.log(JSON.stringify(all, null, 2));
+      return;
+    }
+    for (const j of all) {
+      console.log(
+        `${j.createdAt}  ${j.id.slice(0, 8)}  ${j.status.padEnd(10)}  ${j.kind}` +
+          `${j.label ? `  — ${j.label}` : ""}`,
+      );
+    }
+  });
+
+jobs
+  .command("show <id>")
+  .description("Show one job in full")
+  .action(async (id: string) => {
+    const jobsStore = await import("./jobs/store.js");
+    const j = jobsStore.read(id);
+    if (!j) {
+      console.error(`job not found: ${id}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify(j, null, 2));
+  });
+
+jobs
+  .command("cancel <id>")
+  .description("Cancel a pending or running job")
+  .action(async (id: string) => {
+    const jobsStore = await import("./jobs/store.js");
+    const ok = jobsStore.cancel(id);
+    if (!ok) {
+      console.error(`could not cancel ${id} — not in pending/running state`);
+      process.exit(1);
+    }
+    console.log("cancelled");
+  });
+
 program
   .command("serve")
   .description("Start the local HTTP API")
@@ -409,8 +494,10 @@ program
   .action(async (opts: { port: number }) => {
     const { startScheduler } = await import("./crons/scheduler.js");
     const { startResumePoller } = await import("./resume/poller.js");
+    const { startJobWorker } = await import("./jobs/worker.js");
     startScheduler();
     startResumePoller();
+    startJobWorker();
     startServer(opts.port);
   });
 

@@ -103,4 +103,32 @@ export const migrations: string[] = [
   CREATE INDEX hook_events_session ON hook_events(session_id, received_at);
   CREATE INDEX hook_events_received ON hook_events(received_at DESC);
   `,
+
+  // 3. jobs — long-running work that lives outside any single agent turn.
+  // The agent calls `ais jobs start <kind> ...`, gets a job_id back, and
+  // its turn ends. The worker (running inside `ais serve`) picks the job
+  // up, runs it for as long as needed (seconds to days), then injects the
+  // result back into the originating AiSession as the next turn so the
+  // agent picks up the work without the user having to ping it.
+  // result_json holds the kind-specific result blob; status moves
+  // pending → running → (succeeded|failed|cancelled).
+  `
+  CREATE TABLE jobs (
+    id            TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    payload_json  TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    label         TEXT,
+    ai_session_id TEXT,
+    chat_id       INTEGER,
+    pid           INTEGER,
+    created_at    TEXT NOT NULL,
+    started_at    TEXT,
+    finished_at   TEXT,
+    result_json   TEXT,
+    error         TEXT
+  );
+  CREATE INDEX jobs_status ON jobs(status, created_at);
+  CREATE INDEX jobs_ai_session ON jobs(ai_session_id);
+  `,
 ];

@@ -2023,9 +2023,8 @@ export class TelegramChannel implements Channel {
       // Drain the SDK stream for the two things hooks don't carry: the
       // session_id (so we can route PostToolUse hooks for fresh sessions
       // back to this turn) and image events (codex's imageGeneration item
-      // isn't a standard hook event). Claude tool/text UI is hook-driven;
-      // Codex/opencode do not have the same hook path here, so keep their
-      // provider-stream tool events visible.
+      // isn't a standard hook event). Claude and Codex tool/text UI is
+      // hook-driven; opencode still uses provider-stream tool events.
       const drainer = (async () => {
         if (!live) return;
         for await (const ev of live.events) {
@@ -2057,11 +2056,11 @@ export class TelegramChannel implements Channel {
             console.error("[telegram] route run error event:", ev.message);
             status.push(`❌ ${ev.message}`);
             trace.events.push({ ts: Date.now(), type: "error", message: ev.message });
-          } else if (ai.provider !== "claude" && ev.type === "tool_use") {
+          } else if (ai.provider === "opencode" && ev.type === "tool_use") {
             const inputStr = formatToolInput(ev.input);
             status.push(`🔧 ${ev.name}${inputStr ? `: ${inputStr}` : ""}`);
             trace.events.push({ ts: Date.now(), type: "tool_use", name: ev.name, input: ev.input });
-          } else if (ai.provider !== "claude" && ev.type === "tool_result") {
+          } else if (ai.provider === "opencode" && ev.type === "tool_result") {
             status.markLastDone();
             trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
           }

@@ -21,7 +21,7 @@ import { makeJob, nextFireAfter } from "../crons/scheduler.js";
 import { getUsage } from "../usage/index.js";
 import { VERSION, GIT } from "../version.js";
 import * as hookStore from "../hooks/store.js";
-import { dispatchHook } from "../hooks/dispatch.js";
+import { ingestHook } from "../hooks/ingest.js";
 import type { SubAgent } from "../sub-agents/types.js";
 import type { CronTarget } from "../crons/types.js";
 
@@ -398,23 +398,18 @@ export function createApp() {
     return (req: Request, res: Response) => {
       const payload = (req.body ?? {}) as Record<string, unknown>;
       try {
-        const ev = hookStore.record({ harness, payload });
+        const ev = ingestHook({ harness, payload });
         console.error(
           `[hooks/${harness}] ${ev.eventName}` +
             (ev.toolName ? ` ${ev.toolName}` : "") +
             (ev.sessionId ? ` session=${ev.sessionId.slice(0, 8)}` : ""),
         );
       } catch (e: any) {
-        console.error(`[hooks/${harness}] persist failed:`, e?.message ?? e);
+        console.error(`[hooks/${harness}] ingest failed:`, e?.message ?? e);
       }
       // Drive in-flight UI / bg-task capture from the event. Persistence
       // failure shouldn't block dispatch and dispatch failure shouldn't
       // block the harness — both degrade open with a {"continue": true}.
-      try {
-        dispatchHook({ harness, payload });
-      } catch (e: any) {
-        console.error(`[hooks/${harness}] dispatch failed:`, e?.message ?? e);
-      }
       res.json({ continue: true });
     };
   }

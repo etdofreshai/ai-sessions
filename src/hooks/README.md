@@ -49,7 +49,12 @@ harness still keeps running because we degrade open.
 
 ## Codex (`~/.codex/config.toml`)
 
-Codex doesn't ship hooks natively; install
+ai-sessions-managed Codex runs use `codex app-server`; ai-sessions
+synthesizes Claude-compatible `PreToolUse` / `PostToolUse` events from the
+app-server item notifications and ingests them through `/hooks/codex`
+internally. No local Codex config is needed for those managed runs.
+
+External Codex CLI processes do not ship hooks natively; install
 [hatayama/codex-hooks](https://github.com/hatayama/codex-hooks) which adds a
 Claude-compatible hooks layer. Once installed, the same JSON wiring above
 loads from `~/.codex/codex-hooks.json` (or wherever the plugin reads from).

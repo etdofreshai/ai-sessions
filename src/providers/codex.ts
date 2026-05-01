@@ -21,6 +21,7 @@ import { defaultYolo } from "./types.js";
 import { readJsonl, fileTimes } from "../sessions/jsonl.js";
 import { flattenContent } from "../sessions/content.js";
 import { CodexAppServer } from "./codex-rpc.js";
+import { ingestHook } from "../hooks/ingest.js";
 
 const codexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 const sessionsDir = () => join(codexHome(), "sessions");
@@ -173,6 +174,32 @@ export const codexProvider: Provider = {
           let turnId: string | null = null;
           let textOut = "";
           const imageIds = new Set<string>();
+          const synthesizeToolHooks = (toolName: string, toolInput?: unknown, toolOutput?: unknown): void => {
+            if (!threadId) return;
+            const base = {
+              session_id: threadId,
+              tool_name: toolName,
+              tool_input: toolInput,
+              synthetic: true,
+              source: "codex-app-server",
+            };
+            try {
+              ingestHook({
+                harness: "codex",
+                payload: { ...base, hook_event_name: "PreToolUse" },
+              });
+              ingestHook({
+                harness: "codex",
+                payload: {
+                  ...base,
+                  hook_event_name: "PostToolUse",
+                  tool_response: toolOutput,
+                },
+              });
+            } catch (e) {
+              console.error("[codex] synthetic hook ingest failed:", e instanceof Error ? e.message : String(e));
+            }
+          };
           const turnDone = new Promise<{ status: string; error?: string }>((resolve) => {
             const unsubs: Array<() => void> = [];
             const cleanup = () => unsubs.forEach((fn) => fn());
@@ -201,11 +228,9 @@ export const codexProvider: Provider = {
                     emit({ type: "text", text: item.text });
                   }
                 } else if (item.type === "command_execution") {
-                  emit({
-                    type: "tool_use",
-                    name: "command_execution",
-                    input: { command: item.command, status: item.status },
-                  });
+                  const input = { command: item.command, status: item.status };
+                  synthesizeToolHooks("command_execution", input, item.output ?? item.result ?? item);
+                  emit({ type: "tool_use", name: "command_execution", input });
                 } else if (item.type === "error") {
                   emit({ type: "error", message: item.message ?? "codex error" });
                 } else if (item.type === "imageGeneration") {
@@ -231,8 +256,14 @@ export const codexProvider: Provider = {
                     name: `codex:${item.type}`,
                     input: { id: item.id, status: item.status, savedPath: item.savedPath },
                   });
+                  synthesizeToolHooks(
+                    `codex:${item.type}`,
+                    { id: item.id, status: item.status, savedPath: item.savedPath },
+                    { savedPath: item.savedPath, revisedPrompt: item.revisedPrompt },
+                  );
                 } else {
                   console.error(`[codex] unhandled item/completed type=${item.type} keys=${Object.keys(item).join(",")}`);
+                  synthesizeToolHooks(`codex:${item.type}`, item, item);
                   emit({
                     type: "tool_use",
                     name: `codex:${item.type}`,

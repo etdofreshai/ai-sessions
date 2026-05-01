@@ -101,6 +101,14 @@ async function runChild(
   const status = destChatId != null
     ? await telegramChannel.openSubAgentBubble(destChatId)
     : null;
+  // Lead with a header so the user can tell at a glance which sub-agent
+  // this bubble belongs to — useful when several run in parallel and the
+  // chat has multiple "🤔 thinking…" bubbles editing in place.
+  if (status && subRow) {
+    status.push(
+      `🤖 sub-agent ${subRow.id.slice(0, 8)}${subRow.label ? ` (${subRow.label})` : ""} · ${child.provider}`,
+    );
+  }
   const turn: turnsRegistry.ActiveTurn | null = status && destChatId != null ? {
     aiSessionId: child.id,
     providerSessionId: undefined, // bound below on first session_id event

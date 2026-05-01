@@ -487,6 +487,72 @@ jobs
     console.log("cancelled");
   });
 
+const subagents = program
+  .command("sub-agents")
+  .alias("subagents")
+  .description("Manage parent ↔ sub-agent AiSession relationships");
+
+subagents
+  .command("start <provider>")
+  .description("Spawn a sub-agent of the parent AiSession")
+  .requiredOption("--parent <id>", "parent AiSession id")
+  .requiredOption("--prompt <p>", "first user message for the sub-agent")
+  .option("--cwd <dir>", "working directory (defaults to parent's cwd)")
+  .option("--label <s>", "human-friendly label")
+  .option("--steer-chat <n>", "Telegram chat id to direct-bind for independent steering", (v) => parseInt(v, 10))
+  .option("--json", "print full SubAgent row instead of just the id")
+  .action(async (provider: string, opts: any) => {
+    const { startSubAgent } = await import("./sub-agents/runner.js");
+    try {
+      const sub = await startSubAgent({
+        parentAiSessionId: opts.parent,
+        provider,
+        prompt: opts.prompt,
+        cwd: opts.cwd,
+        label: opts.label,
+        steerChatId: opts.steerChat,
+      });
+      if (opts.json) console.log(JSON.stringify(sub, null, 2));
+      else console.log(sub.id);
+    } catch (e: any) {
+      console.error(e?.message ?? e);
+      process.exit(1);
+    }
+  });
+
+subagents
+  .command("ls")
+  .description("List sub-agents for a parent")
+  .requiredOption("--parent <id>", "parent AiSession id")
+  .option("--json", "output JSON")
+  .action(async (opts: { parent: string; json?: boolean }) => {
+    const subStore = await import("./sub-agents/store.js");
+    const all = subStore.listByParent(opts.parent);
+    if (opts.json) {
+      console.log(JSON.stringify(all, null, 2));
+      return;
+    }
+    for (const s of all) {
+      console.log(
+        `${s.createdAt}  ${s.id.slice(0, 8)}  ${s.status.padEnd(10)}  ${s.provider}` +
+          `${s.label ? `  — ${s.label}` : ""}`,
+      );
+    }
+  });
+
+subagents
+  .command("show <id>")
+  .description("Show one sub-agent in full")
+  .action(async (id: string) => {
+    const subStore = await import("./sub-agents/store.js");
+    const s = subStore.read(id);
+    if (!s) {
+      console.error(`sub-agent not found: ${id}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify(s, null, 2));
+  });
+
 program
   .command("serve")
   .description("Start the local HTTP API")

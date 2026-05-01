@@ -6,6 +6,7 @@ import { startRun } from "../runs/start.js";
 import { planAiSessionResolution } from "../ai-sessions/finalize.js";
 import { buildCatalog } from "../skills/catalog.js";
 import { outstandingJobsSection } from "../jobs/prompt-section.js";
+import { subAgentPolicySection } from "../sub-agents/prompt-section.js";
 import { loadDotenv } from "../sessions/dotenv.js";
 import { sanitizeSubprocessEnv } from "./env-sanitize.js";
 import type { RunHandle } from "../runs/types.js";
@@ -146,7 +147,8 @@ export const codexProvider: Provider = {
           }
           const skillsCatalog = effectiveCwd ? buildCatalog(effectiveCwd) : "";
           const jobsSection = outstandingJobsSection(plan.preResolvedAiSessionId);
-          const developerInstructions = [skillsCatalog, jobsSection]
+          const subAgentSection = subAgentPolicySection(plan.preResolvedAiSessionId);
+          const developerInstructions = [skillsCatalog, jobsSection, subAgentSection]
             .filter(Boolean)
             .join("\n\n");
           if (developerInstructions) {

@@ -6,6 +6,7 @@ import { startRun } from "../runs/start.js";
 import { planAiSessionResolution } from "../ai-sessions/finalize.js";
 import { buildCatalog } from "../skills/catalog.js";
 import { outstandingJobsSection } from "../jobs/prompt-section.js";
+import { subAgentPolicySection } from "../sub-agents/prompt-section.js";
 import { loadDotenv } from "../sessions/dotenv.js";
 import { sanitizeSubprocessEnv } from "./env-sanitize.js";
 import type { RunHandle } from "../runs/types.js";
@@ -219,7 +220,10 @@ export function makeClaudeFlavoredProvider(cfg: ClaudeFlavorConfig): Provider {
 
         const skillsCatalog = effectiveCwd ? buildCatalog(effectiveCwd) : "";
         const jobsSection = outstandingJobsSection(plan.preResolvedAiSessionId);
-        const systemAppend = [skillsCatalog, jobsSection].filter(Boolean).join("\n\n");
+        const subAgentSection = subAgentPolicySection(plan.preResolvedAiSessionId);
+        const systemAppend = [skillsCatalog, jobsSection, subAgentSection]
+          .filter(Boolean)
+          .join("\n\n");
         const workspaceEnv = loadDotenv(effectiveCwd);
         const flavorEnv = cfg.envOverlay?.() ?? {};
         const flavorSettings = cfg.settingsPath?.() ?? null;

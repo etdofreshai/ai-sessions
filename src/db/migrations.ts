@@ -131,4 +131,34 @@ export const migrations: string[] = [
   CREATE INDEX jobs_status ON jobs(status, created_at);
   CREATE INDEX jobs_ai_session ON jobs(ai_session_id);
   `,
+
+  // 4. sub_agents — parent ↔ child mapping for AiSessions spawned through
+  // the outer harness. The outer harness creates the child AiSession and
+  // tracks the relationship here so:
+  //   - hooks from the child's provider session can resolve back to the
+  //     parent's active-turn bubble (preview UX)
+  //   - one-level-deep enforcement can refuse "agent X tries to spawn
+  //     agent Y while X itself is a sub-agent"
+  //   - /sub-agents ls --parent X works
+  // The child's full state (provider, sessionId, cwd, etc.) lives in
+  // ai_sessions; this table only holds the relationship + lifecycle.
+  `
+  CREATE TABLE sub_agents (
+    id                    TEXT PRIMARY KEY,
+    parent_ai_session_id  TEXT NOT NULL,
+    child_ai_session_id   TEXT NOT NULL,
+    provider              TEXT NOT NULL,
+    provider_session_id   TEXT,
+    provider_agent_id     TEXT,
+    label                 TEXT,
+    status                TEXT NOT NULL,
+    created_at            TEXT NOT NULL,
+    started_at            TEXT,
+    finished_at           TEXT,
+    result_summary        TEXT
+  );
+  CREATE INDEX sub_agents_parent ON sub_agents(parent_ai_session_id);
+  CREATE INDEX sub_agents_child ON sub_agents(child_ai_session_id);
+  CREATE INDEX sub_agents_provider_session ON sub_agents(provider_session_id);
+  `,
 ];

@@ -1412,6 +1412,14 @@ export class TelegramChannel implements Channel {
             const title = await this.resolveChatName(tgChatId);
             tgPrefix = title ? `📱 ${title} · ` : "📱 ";
           }
+          // Mark sub-agents so the user knows they're about to direct-bind
+          // a child session (which is the supported way to take steering of
+          // a running sub-agent from a different chat).
+          let subPrefix = "";
+          {
+            const { findByChildAiSession } = await import("../sub-agents/store.js");
+            if (findByChildAiSession(ai.id)) subPrefix = "🤖 ";
+          }
           let main = ai.name?.trim() || "";
           if (!main && ai.sessionId) {
             const path = pathByKey.get(`${ai.provider}:${ai.sessionId}`);
@@ -1421,7 +1429,7 @@ export class TelegramChannel implements Channel {
             }
           }
           if (!main) main = "(unnamed)";
-          e.label = `${tgPrefix}${main} · ${ai.id.slice(0, 4)}`.slice(0, 60);
+          e.label = `${subPrefix}${tgPrefix}${main} · ${ai.id.slice(0, 4)}`.slice(0, 60);
         })
       );
     } else {
@@ -1509,7 +1517,18 @@ export class TelegramChannel implements Channel {
 
     if (data.startsWith("bind:")) {
       const aiId = data.slice("bind:".length);
-      await this.bindAiSession(chatId, messageId, aiId);
+      await this.showBindPreviewChooser(chatId, messageId, aiId);
+      return;
+    }
+
+    if (data.startsWith("bindcommit:")) {
+      // Format: bindcommit:<aiSessionId>:<historyCount>
+      const rest = data.slice("bindcommit:".length);
+      const sep = rest.lastIndexOf(":");
+      if (sep < 0) return;
+      const aiId = rest.slice(0, sep);
+      const count = parseInt(rest.slice(sep + 1), 10) || 0;
+      await this.bindAiSession(chatId, messageId, aiId, { historyCount: count });
       return;
     }
 
@@ -1531,7 +1550,42 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  private async bindAiSession(chatId: number, messageId: number, aiId: string): Promise<void> {
+  // Step 1 of /bind for existing sessions: ask how much prior history to
+  // surface in the chat before committing the bind. Lets the user see
+  // recent context without having to /export afterward. "None" commits
+  // immediately with no preview block.
+  private async showBindPreviewChooser(
+    chatId: number,
+    messageId: number,
+    aiId: string,
+  ): Promise<void> {
+    const s = aiStore.read(aiId);
+    if (!s) {
+      await this.editTo(chatId, messageId, `Session not found: ${aiId}`);
+      return;
+    }
+    const header =
+      `Bind to ${s.id} (${s.provider}${s.name ? ` · ${s.name}` : ""})?\n` +
+      `Optionally show recent history first:`;
+    await this.editTo(chatId, messageId, header, [
+      [
+        { text: "None", callback_data: `bindcommit:${aiId}:0` },
+        { text: "Last 5", callback_data: `bindcommit:${aiId}:5` },
+      ],
+      [
+        { text: "Last 10", callback_data: `bindcommit:${aiId}:10` },
+        { text: "Last 25", callback_data: `bindcommit:${aiId}:25` },
+      ],
+      [{ text: "← back", callback_data: "nav:exist" }],
+    ]);
+  }
+
+  private async bindAiSession(
+    chatId: number,
+    messageId: number,
+    aiId: string,
+    opts: { historyCount?: number } = {},
+  ): Promise<void> {
     const s = aiStore.read(aiId);
     if (!s) {
       await this.editTo(chatId, messageId, `Session not found: ${aiId}`);
@@ -1550,6 +1604,30 @@ export class TelegramChannel implements Channel {
       }
     }
     aiStore.write(s);
+
+    // Optional history preview — fetch the last N user/assistant messages
+    // from the underlying provider session and post them to the chat in a
+    // single preview bubble. Best-effort: a sessions with no provider id
+    // yet, or a getSession failure, just skips the preview.
+    const historyCount = opts.historyCount ?? 0;
+    if (historyCount > 0 && s.sessionId && this.api) {
+      try {
+        const detail = await getProvider(s.provider).getSession(s.sessionId);
+        const msgs = detail.messages.slice(-historyCount);
+        if (msgs.length > 0) {
+          const lines = msgs.map((m) => {
+            const role = m.role === "user" ? "👤" : "🤖";
+            const text = m.content.replace(/\s+/g, " ").trim().slice(0, 400);
+            return `${role} ${text}`;
+          });
+          const preview = `📜 Last ${msgs.length} message${msgs.length === 1 ? "" : "s"}:\n\n${lines.join("\n\n")}`;
+          await this.send({ chatId }, { text: preview });
+        }
+      } catch (e: any) {
+        console.error("[telegram] bind preview failed:", e?.message ?? e);
+      }
+    }
+
     await this.editTo(
       chatId,
       messageId,

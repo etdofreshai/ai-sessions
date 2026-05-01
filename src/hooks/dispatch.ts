@@ -28,7 +28,18 @@ export function dispatchHook(args: {
   if (!sessionId || !eventName) return;
 
   const turn = turns.getByProviderSession(sessionId);
-  if (!turn) return; // session we don't manage right now
+  if (!turn) {
+    // Useful when the bubble doesn't update: tells us the hook arrived but
+    // we have no active turn registered for that session id. Common causes:
+    //   - SDK's claude subprocess invented a new session_id we never bound
+    //   - hook arrived after the route turn cleaned up
+    //   - hook came from a session ai-sessions didn't start
+    console.error(
+      `[hooks] no active turn for ${eventName} session=${sessionId.slice(0, 8)}` +
+        ` (registered: ${turns.debugSnapshot().join(", ") || "(none)"})`,
+    );
+    return;
+  }
 
   switch (eventName) {
     case "PreToolUse":

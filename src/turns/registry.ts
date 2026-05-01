@@ -46,3 +46,12 @@ export function remove(turn: ActiveTurn): void {
   byAiSession.delete(turn.aiSessionId);
   if (turn.providerSessionId) byProviderSession.delete(turn.providerSessionId);
 }
+
+// Diagnostic: short representation of which sessions are currently registered.
+// Used by the hook dispatcher to log "no active turn for X (registered: …)"
+// when a bubble fails to update.
+export function debugSnapshot(): string[] {
+  return [...byAiSession.values()].map((t) =>
+    `ai=${t.aiSessionId.slice(0, 8)} provider=${t.providerSessionId?.slice(0, 8) ?? "(none)"}`,
+  );
+}

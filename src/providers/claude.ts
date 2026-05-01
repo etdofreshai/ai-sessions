@@ -235,7 +235,7 @@ export function makeClaudeFlavoredProvider(cfg: ClaudeFlavorConfig): Provider {
           options: {
             cwd: effectiveCwd,
             env: {
-              ...sanitizeSubprocessEnv(),
+              ...sanitizeSubprocessEnv({ aiSessionId: plan.preResolvedAiSessionId }),
               ...workspaceEnv,
               ...flavorEnv,
             },

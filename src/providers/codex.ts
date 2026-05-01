@@ -127,7 +127,7 @@ export const codexProvider: Provider = {
         if (opts.effort) configOverrides.model_reasoning_effort = opts.effort;
         const client = new CodexAppServer({
           cwd: effectiveCwd,
-          env: { ...sanitizeSubprocessEnv(), ...workspaceEnv },
+          env: { ...sanitizeSubprocessEnv({ aiSessionId: plan.preResolvedAiSessionId }), ...workspaceEnv },
           configOverrides,
         });
         try {

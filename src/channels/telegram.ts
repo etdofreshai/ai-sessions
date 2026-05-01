@@ -8,6 +8,13 @@ import {
   getProviderDefaultEffort,
 } from "../providers/defaults.js";
 import { listSkills } from "../skills/catalog.js";
+import {
+  SKILLS_ADVERTISE_KEY,
+  buildSkillCommands,
+  findSkillByCommand,
+  skillCommandName,
+} from "../skills/commands.js";
+import { getBoolSetting, setBoolSetting } from "../settings.js";
 import { previewFromJsonl, shortenPath } from "../sessions/preview.js";
 import { markdownToTelegramHtml } from "./telegram-format.js";
 import { openStatusBlock } from "./telegram-status.js";
@@ -49,7 +56,7 @@ const SLASH_COMMANDS = [
   { command: "effort", description: "Set reasoning effort: /effort [low|medium|high|xhigh] | /effort default <level>" },
   { command: "cwd", description: "Show the bound session's cwd (read-only — use /new or /fork to switch)" },
   { command: "rename", description: "Rename the bound session (no arg = auto-summarize)" },
-  { command: "skills", description: "List enabled skills in the workspace" },
+  { command: "skills", description: "List skills + toggle slash advertising: /skills | /skills on | /skills off" },
   { command: "stop", description: "Interrupt the current run on this session" },
   { command: "trace", description: "Show full detail of the last run (tools, inputs, outputs, reply)" },
   { command: "export", description: "Export the bound session's transcript as Markdown" },
@@ -175,10 +182,7 @@ export class TelegramChannel implements Channel {
     if (!api) return;
     const me = await api.getMe();
     console.log(`[telegram] bot online as @${me.username ?? me.id}`);
-    // Advertise slash commands in the bot menu. Best-effort — don't block start.
-    api
-      .setMyCommands({ commands: SLASH_COMMANDS })
-      .catch((e: any) => console.error("[telegram] setMyCommands failed:", e?.message ?? e));
+    void this.refreshCommandMenu();
     if (process.env.AI_SESSIONS_DISABLE_POLLING === "1") {
       console.log("[telegram] AI_SESSIONS_DISABLE_POLLING=1 — sending only, not polling");
       return;
@@ -801,24 +805,43 @@ export class TelegramChannel implements Channel {
     }
 
     if (cmd === "/skills") {
-      const ai = aiStore.findByTelegramChat(chatId);
-      const cwd = ai?.cwd ?? workspaceDir();
-      const skills = listSkills(cwd);
-      if (!skills.length) {
+      const sub = arg.trim().toLowerCase();
+      // /skills on|off — toggle whether each skill is advertised as its
+      // own slash command in the Telegram menu. Re-publishes the menu
+      // immediately so the change is visible without a restart.
+      if (sub === "on" || sub === "off") {
+        setBoolSetting(SKILLS_ADVERTISE_KEY, sub === "on");
+        await this.refreshCommandMenu();
         await api.sendMessage({
           chat_id: chatId,
-          text: `No skills found under ${cwd}/skills/. Add SKILL.md files to advertise them.`,
+          text:
+            sub === "on"
+              ? "Skills will be advertised as individual slash commands. Tap the menu to refresh."
+              : "Skills will no longer appear in the slash menu. Direct typing of /<skill> still works.",
         });
         return true;
       }
-      // Per-skill block: <bold name>\n<description>\n\n<bold name>\n…
-      // Markdown bold renders to <b> via markdownToTelegramHtml so the
-      // names stand out. Empty description: skip the second line.
-      const blocks = [`Skills under ${cwd}/skills/`, ""];
+      const ai = aiStore.findByTelegramChat(chatId);
+      const cwd = ai?.cwd ?? workspaceDir();
+      const skills = listSkills(cwd);
+      const advertising = getBoolSetting(SKILLS_ADVERTISE_KEY, true);
+      const headerLines = [
+        `Skills under ${cwd}/skills/`,
+        `Advertised as slash commands: ${advertising ? "on" : "off"} (toggle: /skills on | /skills off)`,
+        "",
+      ];
+      if (!skills.length) {
+        headerLines.push("No skills found. Add SKILL.md files to advertise them.");
+        await api.sendMessage({ chat_id: chatId, text: headerLines.join("\n") });
+        return true;
+      }
+      const blocks = [...headerLines];
       for (const s of skills) {
-        blocks.push(`**${s.name}**`);
+        const cmdName = skillCommandName(s);
+        const tag = cmdName ? `/${cmdName}` : `(skipped: name not a valid command)`;
+        blocks.push(`**${s.name}** — ${tag}`);
         if (s.description) blocks.push(s.description);
-        blocks.push(""); // blank separator
+        blocks.push("");
       }
       await this.send({ chatId }, { text: blocks.join("\n").trimEnd() });
       return true;
@@ -1189,6 +1212,36 @@ export class TelegramChannel implements Channel {
           text: `Interrupt failed: ${e?.message ?? e}`,
         });
       }
+      return true;
+    }
+
+    // Skill-as-slash-command dispatch. /<skill_name> [args] runs the bound
+    // session with a prompt that points at the skill's absolute SKILL.md
+    // path. Works regardless of whether /skills on advertises the command —
+    // direct typing always dispatches.
+    const skillName = cmd.slice(1).split("@")[0]; // strip @botname suffix
+    const ai = aiStore.findByTelegramChat(chatId);
+    const cwd = ai?.cwd ?? workspaceDir();
+    const skill = findSkillByCommand(cwd, skillName);
+    if (skill) {
+      if (!ai) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: "Not bound — /bind a session first to run skills here.",
+        });
+        return true;
+      }
+      const skillArgs = arg.trim();
+      const promptParts = [
+        `Run the \`${skill.name}\` skill (full instructions at ${skill.path}).`,
+      ];
+      if (skillArgs) {
+        promptParts.push("", "User arguments:", skillArgs);
+      } else {
+        promptParts.push("", "(no arguments — read the skill's defaults / usage section)");
+      }
+      promptParts.push("", "Read the SKILL.md file first if you don't already know its contract, then execute.");
+      await this.routeToSession(ai.id, promptParts.join("\n"), chatId, []);
       return true;
     }
 
@@ -2065,6 +2118,27 @@ export class TelegramChannel implements Channel {
     return openStatusBlock(this.api!, chatId, async (text) => {
       await this.send({ chatId }, { text });
     });
+  }
+
+  // (Re)publish the bot menu. Called at start and any time something that
+  // affects what's advertised changes (e.g. /skills on/off). Best-effort:
+  // a Telegram outage shouldn't crash anything.
+  async refreshCommandMenu(): Promise<void> {
+    const api = this.ensureApi();
+    if (!api) return;
+    const advertise = getBoolSetting(SKILLS_ADVERTISE_KEY, true);
+    const skillCommands = advertise
+      ? buildSkillCommands(workspaceDir()).map((s) => ({
+          command: s.command,
+          description: s.description,
+        }))
+      : [];
+    const merged = [...SLASH_COMMANDS, ...skillCommands];
+    try {
+      await api.setMyCommands({ commands: merged });
+    } catch (e: any) {
+      console.error("[telegram] setMyCommands failed:", e?.message ?? e);
+    }
   }
 
   // Public façade used by sub-agents/runner.ts when it needs its own

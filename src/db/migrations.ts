@@ -172,4 +172,14 @@ export const migrations: string[] = [
     default_effort TEXT
   );
   `,
+
+  // 6. app_settings — app-wide key/value store for runtime toggles that
+  // aren't tied to a session, provider, or job. First use: the
+  // skills.advertise_as_commands flag for /skills on|off.
+  `
+  CREATE TABLE app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+  );
+  `,
 ];

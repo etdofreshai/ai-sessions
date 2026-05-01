@@ -142,6 +142,15 @@ export function renderTranscriptMarkdown(ai: AiSession, detail: SessionDetail): 
   return header + body;
 }
 
+// Single-line preview suitable for confirmation/echo messages. Collapses
+// whitespace so a multiline input shows as one bubble line, then trims to
+// the requested character cap with an ellipsis.
+export function truncateForPreview(s: string, max: number): string {
+  const oneLine = s.replace(/\s+/g, " ").trim();
+  if (oneLine.length <= max) return oneLine;
+  return oneLine.slice(0, Math.max(1, max - 1)) + "…";
+}
+
 export function chunk(s: string, size: number): string[] {
   const out: string[] = [];
   for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));

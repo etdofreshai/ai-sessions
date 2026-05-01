@@ -1,9 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import * as aiStore from "../ai-sessions/store.js";
 import type { AiSession, ResumeBgTask } from "../ai-sessions/types.js";
-import { getProvider } from "../providers/index.js";
-import { runToCompletion } from "../runs/drain.js";
-import { channels as channelRegistry } from "../channels/index.js";
+import { injectTurnOnSession } from "../runs/inject.js";
 import { disableResume, dropPendingTask, isResumeExpired } from "./state.js";
 
 const TICK_MS = 5_000;
@@ -89,45 +87,11 @@ async function fireResume(
   ai: AiSession,
   completed: Array<ResumeBgTask & { tail: string }>,
 ): Promise<void> {
-  const channel = channelRegistry.telegram;
-  const chatId = ai.channels?.telegram?.chatId;
-
-  // Friendly heads-up before the re-entry turn lands, so the unprompted
-  // bubble has context.
-  if (channel && chatId) {
-    const ids = completed.map((c) => c.id).join(", ");
-    try {
-      await channel.send(
-        { chatId, threadId: ai.channels?.telegram?.threadId },
-        { text: `⚙️ resume: bg task${completed.length > 1 ? "s" : ""} ${ids} finished — re-entering session` },
-      );
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  const meta = await runToCompletion(
-    getProvider(ai.provider).run({
-      prompt: buildResumePrompt(completed),
-      sessionId: ai.sessionId, // resume the same conversation
-      aiSessionId: ai.id,
-      cwd: ai.cwd,
-      yolo: true,
-      effort: ai.reasoningEffort,
-    }),
-  );
-
-  if (channel && chatId) {
-    const text = (meta.output ?? "").trim() || (meta.error ? `Run failed: ${meta.error}` : "(no output)");
-    try {
-      await channel.send(
-        { chatId, threadId: ai.channels?.telegram?.threadId },
-        { text },
-      );
-    } catch (e: any) {
-      console.error(`[resume] fanout to chat ${chatId} failed:`, e?.message ?? e);
-    }
-  }
+  const ids = completed.map((c) => c.id).join(", ");
+  await injectTurnOnSession(ai, buildResumePrompt(completed), {
+    resumeSession: true,
+    heralded: `⚙️ resume: bg task${completed.length > 1 ? "s" : ""} ${ids} finished — re-entering session`,
+  });
 }
 
 function buildResumePrompt(

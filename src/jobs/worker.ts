@@ -1,9 +1,7 @@
 import { spawn } from "node:child_process";
 import * as jobsStore from "./store.js";
 import * as aiStore from "../ai-sessions/store.js";
-import { getProvider } from "../providers/index.js";
-import { runToCompletion } from "../runs/drain.js";
-import { channels as channelRegistry } from "../channels/index.js";
+import { injectTurnOnSession } from "../runs/inject.js";
 import type { Job, JobResultBash } from "./types.js";
 
 const TICK_MS = 5_000;
@@ -127,9 +125,8 @@ async function runBash(
 }
 
 // After a job lands, re-enter the originating AiSession with the result so
-// the agent can reason about it as the next turn — same pattern cron and
-// resume use. If no AiSession is bound, the job is fire-and-forget; we
-// just record the result and stop.
+// the agent can reason about it as the next turn. If no AiSession is bound,
+// the job is fire-and-forget; we just record the result and stop.
 async function injectResult(jobId: string): Promise<void> {
   const job = jobsStore.read(jobId);
   if (!job) return;
@@ -139,48 +136,10 @@ async function injectResult(jobId: string): Promise<void> {
     console.error(`[jobs] ${jobId} ai-session ${job.aiSessionId} gone — skipping injection`);
     return;
   }
-
-  const channel = channelRegistry.telegram;
-  const chatId = job.chatId ?? ai.channels?.telegram?.chatId;
-  if (channel && chatId) {
-    try {
-      await channel.send(
-        { chatId, threadId: ai.channels?.telegram?.threadId },
-        {
-          text: `⚙️ job ${job.id.slice(0, 8)}${job.label ? ` (${job.label})` : ""} ${
-            job.status
-          } — re-entering session`,
-        },
-      );
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  const meta = await runToCompletion(
-    getProvider(ai.provider).run({
-      prompt: buildInjectionPrompt(job),
-      sessionId: ai.sessionId,
-      aiSessionId: ai.id,
-      cwd: ai.cwd,
-      yolo: true,
-      effort: ai.reasoningEffort,
-    }),
-  );
-
-  if (channel && chatId) {
-    const text =
-      (meta.output ?? "").trim() ||
-      (meta.error ? `Run failed: ${meta.error}` : "(no output)");
-    try {
-      await channel.send(
-        { chatId, threadId: ai.channels?.telegram?.threadId },
-        { text },
-      );
-    } catch (e: any) {
-      console.error(`[jobs] fanout to chat ${chatId} failed:`, e?.message ?? e);
-    }
-  }
+  await injectTurnOnSession(ai, buildInjectionPrompt(job), {
+    resumeSession: true,
+    heralded: `⚙️ job ${job.id.slice(0, 8)}${job.label ? ` (${job.label})` : ""} ${job.status} — re-entering session`,
+  });
 }
 
 function buildInjectionPrompt(job: Job): string {

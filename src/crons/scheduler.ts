@@ -2,12 +2,10 @@ import { spawn } from "node:child_process";
 import { CronExpressionParser } from "cron-parser";
 import { getProvider } from "../providers/index.js";
 import { runToCompletion } from "../runs/drain.js";
+import { injectTurnOnSession } from "../runs/inject.js";
 import * as aiStore from "../ai-sessions/store.js";
-import { channels as channelRegistry } from "../channels/index.js";
 import * as store from "./store.js";
 import type { CronJob } from "./types.js";
-import type { AiSession } from "../ai-sessions/types.js";
-import type { RunMetadata } from "../runs/types.js";
 
 const TICK_MS = 30_000;
 
@@ -53,73 +51,29 @@ async function fire(job: CronJob): Promise<void> {
     return;
   }
 
-  let provider: string;
-  let sessionId: string | undefined;
-  let aiSessionId: string | undefined;
-  let aiSession: AiSession | null = null;
-
   if (t.kind === "ai_session") {
-    const s = aiStore.read(t.aiSessionId);
-    if (!s) throw new Error(`ai-session not found: ${t.aiSessionId}`);
-    provider = s.provider;
-    aiSessionId = s.id;
-    aiSession = s;
+    const ai = aiStore.read(t.aiSessionId);
+    if (!ai) throw new Error(`ai-session not found: ${t.aiSessionId}`);
     // Cron-fired runs deliberately do NOT resume the AiSession's existing
-    // provider session: a cron should fire with a clean context every time,
-    // not collide with whatever the user is doing in that session right now.
-    // The AiSession is kept only as the addressing/binding handle — its
-    // bound channel still receives the reply via fanOutToChannels below.
-    sessionId = undefined;
-  } else {
-    provider = t.provider;
-    sessionId = t.sessionId;
+    // provider session: a cron fires with clean context every time so it
+    // can't collide with whatever the user is doing in that session.
+    await injectTurnOnSession(ai, t.prompt, {
+      resumeSession: false,
+      heralded: `⏰ \`${job.name}\``,
+    });
+    return;
   }
 
-  // Cron runs are ephemeral: don't let attachToMeta overwrite the
-  // AiSession's bound provider sessionId with this cron's fresh one.
-  // We don't relay tool/image events from a cron-fired run yet — just the
-  // final text to bound channels.
-  const meta = await runToCompletion(
-    getProvider(provider).run({
+  // provider_session target: no AiSession wrapper, so we run directly and
+  // skip channel fanout (no binding to fan out to).
+  await runToCompletion(
+    getProvider(t.provider).run({
       prompt: t.prompt,
-      sessionId,
-      aiSessionId: aiSession ? undefined : aiSessionId,
-      internal: aiSession ? true : undefined,
-      cwd: t.cwd ?? aiSession?.cwd,
+      sessionId: t.sessionId,
+      cwd: t.cwd,
       yolo: true,
-      effort: aiSession?.reasoningEffort,
     }),
   );
-
-  // Fan out the run's final text to any channels bound to this AiSession.
-  // User-initiated runs (e.g. Telegram /msg) already publish their own
-  // status; cron-initiated runs need this hook explicitly.
-  if (aiSession) await fanOutToChannels(aiSession, meta, job);
-}
-
-async function fanOutToChannels(
-  ai: AiSession,
-  meta: RunMetadata,
-  job: CronJob,
-): Promise<void> {
-  const chatId = ai.channels?.telegram?.chatId;
-  if (!chatId) return;
-  const channel = channelRegistry.telegram;
-  if (!channel) return;
-  const text = (meta.output ?? "").trim();
-  const body = text || (meta.error ? `Run failed: ${meta.error}` : "(no output)");
-  // Cron-fired runs aren't tied to a user message, so prefix with the job
-  // name — otherwise the bubble feels like it appeared out of nowhere.
-  const out = `⏰ \`${job.name}\`\n\n${body}`;
-  try {
-    await channel.send(
-      { chatId, threadId: ai.channels?.telegram?.threadId },
-      { text: out },
-    );
-    console.error(`[crons] fanOut ok name=${job.name} chat=${chatId} bytes=${out.length}`);
-  } catch (e: any) {
-    console.error(`[crons] fanOut to telegram chat ${chatId} failed: ${e?.message ?? e}`);
-  }
 }
 
 // Returns true if this process won the race to fire the job.

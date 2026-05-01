@@ -23,6 +23,7 @@ import { VERSION, GIT } from "../version.js";
 import * as hookStore from "../hooks/store.js";
 import { dispatchHook } from "../hooks/dispatch.js";
 import type { SubAgent } from "../sub-agents/types.js";
+import type { CronTarget } from "../crons/types.js";
 
 // Stall threshold for the running-but-silent heuristic. 5 minutes covers a
 // long Bash + a reasoning step but flags genuinely stuck runs. Tunable via
@@ -44,6 +45,55 @@ function decorate(sub: SubAgent): SubAgent & {
     sub.status === "running" && lastMs != null ? now - lastMs : null;
   const stalled = sub.status === "running" && (idleMs ?? 0) > SUBAGENT_STALL_MS;
   return { ...sub, durationMs, idleMs, stalled };
+}
+
+function providerNames(): Set<string> {
+  return new Set(listProviderNames());
+}
+
+function validateAiSessionId(value: unknown, field: string): { ok: true } | { ok: false; status: number; error: string } {
+  if (typeof value !== "string" || value.trim() === "") {
+    return { ok: false, status: 400, error: `${field} required` };
+  }
+  if (providerNames().has(value)) {
+    return {
+      ok: false,
+      status: 400,
+      error: `${field} must be an AiSession id, not provider name "${value}"`,
+    };
+  }
+  if (!aiStore.read(value)) {
+    return { ok: false, status: 400, error: `ai-session not found: ${value}` };
+  }
+  return { ok: true };
+}
+
+function validateCronTarget(target: any): { ok: true; target: CronTarget } | { ok: false; status: number; error: string } {
+  if (!target?.kind) return { ok: false, status: 400, error: "target.kind required" };
+  if (target.kind === "ai_session") {
+    const id = validateAiSessionId(target.aiSessionId, "target.aiSessionId");
+    if (!id.ok) return id;
+    if (typeof target.prompt !== "string" || target.prompt.trim() === "") {
+      return { ok: false, status: 400, error: "target.prompt required" };
+    }
+    return { ok: true, target };
+  }
+  if (target.kind === "provider_session") {
+    if (typeof target.provider !== "string" || !providerNames().has(target.provider)) {
+      return { ok: false, status: 400, error: `unknown provider: ${target.provider ?? ""}` };
+    }
+    if (typeof target.prompt !== "string" || target.prompt.trim() === "") {
+      return { ok: false, status: 400, error: "target.prompt required" };
+    }
+    return { ok: true, target };
+  }
+  if (target.kind === "command") {
+    if (typeof target.command !== "string" || target.command.trim() === "") {
+      return { ok: false, status: 400, error: "target.command required" };
+    }
+    return { ok: true, target };
+  }
+  return { ok: false, status: 400, error: `unknown target.kind: ${target.kind}` };
 }
 
 export function createApp() {
@@ -205,6 +255,43 @@ export function createApp() {
     res.json(s);
   });
 
+  app.get("/current-session", (req, res) => {
+    const aiSessionId =
+      (req.query.aiSessionId as string | undefined) ??
+      (req.header("x-ai-session-id") || undefined);
+    if (aiSessionId) {
+      const s = aiStore.read(aiSessionId);
+      if (!s) return res.status(404).json({ error: `ai-session not found: ${aiSessionId}` });
+      return res.json(s);
+    }
+
+    const provider =
+      (req.query.provider as string | undefined) ??
+      (req.header("x-provider") || undefined);
+    const providerSessionId =
+      (req.query.providerSessionId as string | undefined) ??
+      (req.query.sessionId as string | undefined) ??
+      (req.header("x-provider-session-id") || undefined);
+    if (provider || providerSessionId) {
+      if (!provider || !providerSessionId) {
+        return res.status(400).json({ error: "provider and providerSessionId are both required" });
+      }
+      const s = aiStore.findByProviderSession(provider, providerSessionId);
+      if (!s) {
+        return res.status(404).json({
+          error: `ai-session not found for provider=${provider} providerSessionId=${providerSessionId}`,
+        });
+      }
+      return res.json(s);
+    }
+
+    res.status(400).json({
+      error:
+        "current session cannot be inferred from a bare HTTP request; pass aiSessionId or provider+providerSessionId",
+      hint: "For Codex shells, use /current-session?provider=codex&providerSessionId=$CODEX_THREAD_ID.",
+    });
+  });
+
   app.patch("/sessions/:id", (req, res) => {
     const s = aiStore.read(req.params.id);
     if (!s) return res.status(404).json({ error: "ai-session not found" });
@@ -250,7 +337,9 @@ export function createApp() {
     if (!name || !cron || !target?.kind) {
       return res.status(400).json({ error: "name, cron, target.kind required" });
     }
-    const job = makeJob({ name, cron, target, timezone, missedPolicy });
+    const valid = validateCronTarget(target);
+    if (!valid.ok) return res.status(valid.status).json({ error: valid.error });
+    const job = makeJob({ name, cron, target: valid.target, timezone, missedPolicy });
     cronStore.write(job);
     res.json(job);
   });
@@ -261,7 +350,11 @@ export function createApp() {
     const { enabled, cron, target, timezone, missedPolicy } = req.body ?? {};
     if (typeof enabled === "boolean") j.enabled = enabled;
     if (typeof cron === "string") j.cron = cron;
-    if (target) j.target = target;
+    if (target) {
+      const valid = validateCronTarget(target);
+      if (!valid.ok) return res.status(valid.status).json({ error: valid.error });
+      j.target = valid.target;
+    }
     if (typeof timezone === "string") j.timezone = timezone;
     if (missedPolicy) j.missedPolicy = missedPolicy;
     j.nextRunAt = nextFireAfter(j.cron, new Date(), j.timezone).toISOString();
@@ -388,7 +481,8 @@ export function createApp() {
     try {
       const { startSubAgent } = await import("../sub-agents/runner.js");
       const { parentAiSessionId, provider, prompt, cwd, label, steerChatId } = req.body ?? {};
-      if (!parentAiSessionId) return res.status(400).json({ error: "parentAiSessionId required" });
+      const parent = validateAiSessionId(parentAiSessionId, "parentAiSessionId");
+      if (!parent.ok) return res.status(parent.status).json({ error: parent.error });
       if (!provider) return res.status(400).json({ error: "provider required" });
       if (!prompt) return res.status(400).json({ error: "prompt required" });
       const sub = await startSubAgent({ parentAiSessionId, provider, prompt, cwd, label, steerChatId });
@@ -408,10 +502,9 @@ export function createApp() {
     try {
       const subStore = await import("../sub-agents/store.js");
       const parentAiSessionId = req.query.parent as string | undefined;
-      if (!parentAiSessionId) {
-        return res.status(400).json({ error: "?parent=<ai-session-id> required" });
-      }
-      res.json(subStore.listByParent(parentAiSessionId).map(decorate));
+      const parent = validateAiSessionId(parentAiSessionId, "parent");
+      if (!parent.ok) return res.status(parent.status).json({ error: parent.error });
+      res.json(subStore.listByParent(parentAiSessionId as string).map(decorate));
     } catch (e) {
       next(e);
     }

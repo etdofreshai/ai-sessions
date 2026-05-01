@@ -113,7 +113,10 @@ export const opencodeProvider: Provider = {
           const workspaceEnv = loadDotenv(effectiveCwd);
           const child = spawn("opencode", args, {
             cwd: effectiveCwd,
-            env: { ...sanitizeSubprocessEnv({ aiSessionId: plan.preResolvedAiSessionId }), ...workspaceEnv },
+            env: sanitizeSubprocessEnv(
+              { aiSessionId: plan.preResolvedAiSessionId },
+              { ...(process.env as Record<string, string | undefined>), ...workspaceEnv },
+            ),
             stdio: ["ignore", "pipe", "pipe"],
             shell: process.platform === "win32",
           });

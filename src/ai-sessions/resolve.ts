@@ -48,6 +48,7 @@ export function finalize(args: {
   if (args.preexisting) {
     args.preexisting.sessionId = args.providerSessionId;
     if (args.cwd && !args.preexisting.cwd) args.preexisting.cwd = args.cwd;
+    if (!args.preexisting.name && args.name) args.preexisting.name = args.name;
     return store.write(args.preexisting);
   }
   return store.create({

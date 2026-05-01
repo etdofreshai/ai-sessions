@@ -38,20 +38,32 @@ export function planAiSessionResolution(args: {
     };
   }
 
-  const pre = preResolve({
+  let pre = preResolve({
     provider: args.provider,
     asId: args.asId,
     providerSessionId: args.sessionId,
   });
+
+  // Reserve brand-new AiSessions before the provider process starts so the
+  // subprocess gets AI_SESSION_ID/PARENT_AI_SESSION_ID on its first turn. The
+  // provider-side session id is attached when the run finalizes.
+  if (!pre.preexisting) {
+    const reserved = store.create({
+      provider: args.provider,
+      cwd: args.cwd,
+      name: null,
+    });
+    pre = { preexisting: reserved, needsPostResolve: true };
+  }
 
   const effectiveProviderSessionId = args.sessionId ?? pre.preexisting?.sessionId;
   // If we're resuming a known AiSession with a recorded cwd, that wins.
   // Fresh runs use the caller-supplied cwd.
   const effectiveCwd = pre.preexisting?.cwd ?? args.cwd;
 
-  // Brand-new AiSession path: kick off naming in parallel.
+  // Brand-new/reserved AiSession path: kick off naming in parallel.
   let pendingName: Promise<string> | undefined;
-  if (!pre.preexisting) {
+  if (pre.needsPostResolve && pre.preexisting && !pre.preexisting.name) {
     pendingName = generateName(args.prompt);
   }
 

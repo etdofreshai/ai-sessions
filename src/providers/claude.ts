@@ -234,11 +234,14 @@ export function makeClaudeFlavoredProvider(cfg: ClaudeFlavorConfig): Provider {
           prompt: userStream(),
           options: {
             cwd: effectiveCwd,
-            env: {
-              ...sanitizeSubprocessEnv({ aiSessionId: plan.preResolvedAiSessionId }),
-              ...workspaceEnv,
-              ...flavorEnv,
-            },
+            env: sanitizeSubprocessEnv(
+              { aiSessionId: plan.preResolvedAiSessionId },
+              {
+                ...(process.env as Record<string, string | undefined>),
+                ...workspaceEnv,
+                ...flavorEnv,
+              },
+            ),
             ...(flavorSettings ? { settings: flavorSettings } : {}),
             ...(systemAppend
               ? {

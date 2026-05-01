@@ -37,6 +37,7 @@ export function sanitizeSubprocessEnv(
   }
   if (opts.aiSessionId) {
     out.AI_SESSION_ID = opts.aiSessionId;
+    out.PARENT_AI_SESSION_ID = opts.aiSessionId;
   }
   return out;
 }

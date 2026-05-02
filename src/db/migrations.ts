@@ -190,4 +190,66 @@ export const migrations: string[] = [
   `
   ALTER TABLE sub_agents ADD COLUMN last_activity_at TEXT;
   `,
+
+  // 8. sub_agent_tasks — supervisor-driven task queue for long-horizon
+  // multi-agent plans. A supervisor AiSession creates tasks here; the
+  // backend scheduler launches them when their dependencies complete,
+  // links them to a real sub_agents row when dispatched, and marks them
+  // stale/failed if they go silent past timeout_seconds. Worktree
+  // metadata lives directly on the task (no separate table). Events are
+  // append-only for debugging/history. See plan in commit message.
+  `
+  CREATE TABLE sub_agent_tasks (
+    id                    TEXT PRIMARY KEY,
+    ai_session_id         TEXT NOT NULL,
+    title                 TEXT NOT NULL,
+    prompt                TEXT NOT NULL,
+    response              TEXT,
+    status                TEXT NOT NULL DEFAULT 'created',
+    provider              TEXT,
+    provider_session_id   TEXT,
+    sub_agent_id          TEXT,
+    effort                TEXT,
+    cwd                   TEXT,
+    base_ref              TEXT,
+    branch_name           TEXT,
+    worktree_path         TEXT,
+    merge_strategy        TEXT NOT NULL DEFAULT 'auto',
+    attempt_count         INTEGER NOT NULL DEFAULT 0,
+    max_attempts          INTEGER NOT NULL DEFAULT 2,
+    timeout_seconds       INTEGER NOT NULL DEFAULT 1200,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL,
+    started_at            TEXT,
+    finished_at           TEXT,
+    deleted_at            TEXT
+  );
+  CREATE INDEX sub_agent_tasks_ai_session ON sub_agent_tasks(ai_session_id);
+  CREATE INDEX sub_agent_tasks_status ON sub_agent_tasks(status);
+  CREATE INDEX sub_agent_tasks_scheduler ON sub_agent_tasks(ai_session_id, status, created_at);
+  CREATE INDEX sub_agent_tasks_provider_session ON sub_agent_tasks(provider_session_id);
+  CREATE INDEX sub_agent_tasks_sub_agent ON sub_agent_tasks(sub_agent_id);
+
+  CREATE TABLE sub_agent_task_dependencies (
+    id                  TEXT PRIMARY KEY,
+    task_id             TEXT NOT NULL,
+    depends_on_task_id  TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    UNIQUE(task_id, depends_on_task_id),
+    FOREIGN KEY (task_id) REFERENCES sub_agent_tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY (depends_on_task_id) REFERENCES sub_agent_tasks(id) ON DELETE CASCADE
+  );
+  CREATE INDEX sub_agent_task_dependencies_task ON sub_agent_task_dependencies(task_id);
+  CREATE INDEX sub_agent_task_dependencies_depends_on ON sub_agent_task_dependencies(depends_on_task_id);
+
+  CREATE TABLE sub_agent_task_events (
+    id          TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+    message     TEXT,
+    created_at  TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES sub_agent_tasks(id) ON DELETE CASCADE
+  );
+  CREATE INDEX sub_agent_task_events_task ON sub_agent_task_events(task_id, created_at);
+  `,
 ];

@@ -559,8 +559,12 @@ program
   .action(async (opts: { port: number }) => {
     const { startScheduler } = await import("./crons/scheduler.js");
     const { startJobWorker } = await import("./jobs/worker.js");
+    const { startScheduler: startTaskScheduler } = await import(
+      "./sub-agent-tasks/scheduler.js"
+    );
     startScheduler();
     startJobWorker();
+    startTaskScheduler();
     startServer(opts.port);
   });
 

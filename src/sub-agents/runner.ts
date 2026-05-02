@@ -1,5 +1,6 @@
 import * as aiStore from "../ai-sessions/store.js";
 import * as subStore from "./store.js";
+import * as taskStore from "../sub-agent-tasks/store.js";
 import { getProvider, listProviderNames } from "../providers/index.js";
 import { telegramChannel } from "../channels/telegram.js";
 import * as turnsRegistry from "../turns/registry.js";
@@ -17,6 +18,11 @@ export interface StartSubAgentArgs {
   // channel of its own — the parent's chat sees a preview bubble via
   // hook routing instead.
   steerChatId?: number;
+  // Optional sub_agent_tasks.id this dispatch fulfills. When set, the
+  // runner mirrors lifecycle (started/activity/completed/failed) onto the
+  // task row so the supervisor can resume long plans across restarts.
+  taskId?: string;
+  effort?: string;
 }
 
 // Spawn a sub-agent: create a child AiSession, link it to the parent,
@@ -60,11 +66,29 @@ export async function startSubAgent(args: StartSubAgentArgs): Promise<SubAgent> 
     label: args.label,
   });
 
+  // If this dispatch fulfills a sub_agent_tasks row, link the two and
+  // bump the task into 'running' immediately. The provider session id
+  // gets backfilled in runChild on the first session_id event.
+  if (args.taskId) {
+    try {
+      taskStore.markStarted({
+        taskId: args.taskId,
+        provider: args.provider,
+        subAgentId: sub.id,
+      });
+    } catch (e: unknown) {
+      console.error(
+        `[sub-agents] task ${args.taskId} markStarted failed:`,
+        e instanceof Error ? e.message : e,
+      );
+    }
+  }
+
   // Kick the run. We don't await here — the caller decides whether to
   // block on completion. The promise updates the SubAgent row as it
   // progresses; hook events from the child's session_id route back to
   // the parent's preview bubble via hooks/dispatch.ts.
-  void runChild(sub.id, child.id, args.prompt).catch((e) => {
+  void runChild(sub.id, child.id, args.prompt, args.taskId).catch((e) => {
     console.error(`[sub-agents] ${sub.id} run failed:`, e?.message ?? e);
   });
 
@@ -96,6 +120,7 @@ async function runChild(
   subId: string,
   childAiSessionId: string,
   prompt: string,
+  taskId?: string,
 ): Promise<void> {
   const child = aiStore.read(childAiSessionId);
   if (!child) {
@@ -168,8 +193,14 @@ async function runChild(
   // could be missed.
   for await (const ev of handle.events) {
     subStore.touchActivity(subId);
+    if (taskId) {
+      try { taskStore.touchActivity(taskId); } catch { /* best effort */ }
+    }
     if (ev.type === "session_id") {
       subStore.bindProviderSession(subId, ev.sessionId);
+      if (taskId) {
+        try { taskStore.bindProviderSession(taskId, ev.sessionId); } catch { /* best effort */ }
+      }
       if (turn) turnsRegistry.bindProviderSession(turn.aiSessionId, ev.sessionId);
     } else if (ev.type === "image" && destChatId != null) {
       try {
@@ -213,6 +244,27 @@ async function runChild(
     (meta.output ?? "").trim() ||
     (meta.error ? `Run failed: ${meta.error}` : "(no output)");
   if (meta.output) subStore.setResultSummary(subId, meta.output);
+
+  // Mirror terminal status onto the linked task row, if any. The
+  // supervisor reads this back to decide whether to merge, retry, or
+  // escalate. Worktree merge is not attempted here — the supervisor owns
+  // that decision and may flip the task to merge_failed via the API.
+  if (taskId) {
+    try {
+      if (meta.status === "completed") {
+        taskStore.complete(taskId, meta.output ?? undefined);
+      } else if (meta.status === "failed") {
+        taskStore.fail(taskId, meta.error ?? "run failed");
+      } else {
+        taskStore.cancel(taskId, "run cancelled");
+      }
+    } catch (e: unknown) {
+      console.error(
+        `[sub-agents] task ${taskId} terminal update failed:`,
+        e instanceof Error ? e.message : e,
+      );
+    }
+  }
 
   // Finalize the sub-agent's own bubble with a header + the full reply
   // so the user can scroll it back later. Best-effort — don't let a

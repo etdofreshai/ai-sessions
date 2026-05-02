@@ -535,6 +535,277 @@ export function createApp() {
     }
   });
 
+  // ─── Sub-agent tasks ────────────────────────────────────────────────────
+  // Supervisor-driven task queue. The supervisor LLM owns judgment (which
+  // tasks to create, dependencies, retry policy, merge resolution); the
+  // server owns deterministic mechanics (storage, dependency resolution,
+  // stale detection, event log). See plan in commit message.
+  app.post("/sub-agent-tasks", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const body = req.body ?? {};
+      const ai = validateAiSessionId(body.aiSessionId, "aiSessionId");
+      if (!ai.ok) return res.status(ai.status).json({ error: ai.error });
+      if (typeof body.title !== "string" || !body.title.trim()) {
+        return res.status(400).json({ error: "title required" });
+      }
+      if (typeof body.prompt !== "string" || !body.prompt.trim()) {
+        return res.status(400).json({ error: "prompt required" });
+      }
+      if (body.dependsOn !== undefined && !Array.isArray(body.dependsOn)) {
+        return res.status(400).json({ error: "dependsOn must be an array of task ids" });
+      }
+      const task = taskStore.create({
+        aiSessionId: body.aiSessionId,
+        title: body.title,
+        prompt: body.prompt,
+        provider: body.provider,
+        effort: body.effort,
+        cwd: body.cwd,
+        baseRef: body.baseRef,
+        branchName: body.branchName,
+        worktreePath: body.worktreePath,
+        mergeStrategy: body.mergeStrategy,
+        maxAttempts: body.maxAttempts,
+        timeoutSeconds: body.timeoutSeconds,
+        dependsOn: body.dependsOn,
+      });
+      res.json(task);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/sub-agent-tasks", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const aiSessionId = req.query.aiSessionId as string | undefined;
+      const status = req.query.status as string | undefined;
+      const includeDeleted = req.query.includeDeleted === "1";
+      if (aiSessionId) {
+        const ai = validateAiSessionId(aiSessionId, "aiSessionId");
+        if (!ai.ok) return res.status(ai.status).json({ error: ai.error });
+      }
+      res.json(taskStore.list({
+        aiSessionId,
+        status: status as never,
+        includeDeleted,
+      }));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/sub-agent-tasks/runnable", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const aiSessionId = req.query.aiSessionId as string | undefined;
+      const ai = validateAiSessionId(aiSessionId, "aiSessionId");
+      if (!ai.ok) return res.status(ai.status).json({ error: ai.error });
+      res.json(taskStore.listRunnable(aiSessionId as string));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/sub-agent-tasks/:id", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      res.json(task);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.patch("/sub-agent-tasks/:id", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const existing = taskStore.read(req.params.id);
+      if (!existing) return res.status(404).json({ error: "task not found" });
+      const updated = taskStore.update(req.params.id, req.body ?? {});
+      res.json(updated);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.delete("/sub-agent-tasks/:id", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      taskStore.softDelete(req.params.id);
+      res.json({ ok: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Dispatch a task: launch a sub-agent for it. Picks provider from
+  // request body, falling back to the task's stored provider field.
+  app.post("/sub-agent-tasks/:id/dispatch", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const { startSubAgent } = await import("../sub-agents/runner.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      if (task.deletedAt) return res.status(409).json({ error: "task is deleted" });
+      if (task.status !== "created" && task.status !== "merge_failed") {
+        return res.status(409).json({ error: `task is ${task.status}; only created/merge_failed can be dispatched` });
+      }
+      const provider = (req.body?.provider as string | undefined) ?? task.provider;
+      if (!provider) return res.status(400).json({ error: "provider required (not set on task and not in body)" });
+      const deps = taskStore.listDependencies(task.id);
+      for (const d of deps) {
+        const dep = taskStore.read(d.dependsOnTaskId);
+        if (!dep || dep.status !== "completed") {
+          return res.status(409).json({
+            error: `dependency ${d.dependsOnTaskId} is ${dep?.status ?? "missing"}; cannot dispatch`,
+          });
+        }
+      }
+      const sub = await startSubAgent({
+        parentAiSessionId: task.aiSessionId,
+        provider,
+        prompt: task.prompt,
+        cwd: task.worktreePath ?? task.cwd,
+        label: task.title,
+        taskId: task.id,
+      });
+      res.json({ task: taskStore.read(task.id), subAgent: sub });
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      if (/^one-level-deep|^unknown provider|not found/i.test(msg)) {
+        return res.status(400).json({ error: msg });
+      }
+      next(e);
+    }
+  });
+
+  app.post("/sub-agent-tasks/:id/cancel", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const { cancelSubAgent } = await import("../sub-agents/runner.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      if (
+        task.status === "completed" ||
+        task.status === "failed" ||
+        task.status === "cancelled"
+      ) {
+        return res.status(409).json({ error: `task already ${task.status}` });
+      }
+      const reason = (req.body?.reason as string | undefined) ?? "cancelled by request";
+      // If the task is running and tied to a sub-agent, interrupt that
+      // sub-agent first; the runner's terminal-status path will mirror
+      // the status onto the task. Otherwise just mark the row directly.
+      if (task.status === "running" && task.subAgentId) {
+        cancelSubAgent(task.subAgentId);
+      }
+      taskStore.cancel(task.id, reason);
+      res.json(taskStore.read(task.id));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/sub-agent-tasks/:id/complete", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      taskStore.complete(req.params.id, req.body?.response);
+      res.json(taskStore.read(req.params.id));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/sub-agent-tasks/:id/fail", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      taskStore.fail(req.params.id, req.body?.response);
+      res.json(taskStore.read(req.params.id));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/sub-agent-tasks/:id/merge-failed", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      const response = req.body?.response;
+      if (typeof response !== "string" || !response.trim()) {
+        return res.status(400).json({ error: "response required (merge error details)" });
+      }
+      taskStore.markMergeFailed(req.params.id, response);
+      res.json(taskStore.read(req.params.id));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/sub-agent-tasks/:id/dependencies", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      const dependsOnTaskId = req.body?.dependsOnTaskId;
+      if (typeof dependsOnTaskId !== "string" || !dependsOnTaskId) {
+        return res.status(400).json({ error: "dependsOnTaskId required" });
+      }
+      const dep = taskStore.read(dependsOnTaskId);
+      if (!dep) return res.status(400).json({ error: `dependsOnTaskId not found: ${dependsOnTaskId}` });
+      const created = taskStore.addDependency(task.id, dependsOnTaskId);
+      res.json(created);
+    } catch (e: any) {
+      if (/cannot depend on itself/.test(e?.message ?? "")) {
+        return res.status(400).json({ error: e.message });
+      }
+      next(e);
+    }
+  });
+
+  app.delete("/sub-agent-tasks/:id/dependencies/:depId", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const removed = taskStore.removeDependency(req.params.id, req.params.depId);
+      if (!removed) return res.status(404).json({ error: "dependency not found" });
+      res.json({ ok: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/sub-agent-tasks/:id/dependencies", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      res.json(taskStore.listDependencies(req.params.id));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/sub-agent-tasks/:id/events", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      const limit = Math.min(Number(req.query.limit ?? 200), 1000) || 200;
+      res.json(taskStore.listEvents(req.params.id, limit));
+    } catch (e) {
+      next(e);
+    }
+  });
+
   app.get("/hooks", (req, res) => {
     const sessionId = (req.query.session_id as string | undefined) ?? undefined;
     const limit = Math.min(Number(req.query.limit ?? 200), 1000) || 200;

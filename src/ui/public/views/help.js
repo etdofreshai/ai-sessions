@@ -29,6 +29,14 @@ export function mount(root) {
         <li><kbd>Esc</kbd> — close drawer / modal</li>
         <li><kbd>click</kbd> a row — open drawer</li>
         <li><kbd>click</kbd> empty content — close drawer</li>
+        <li><kbd>?</kbd> — open this help page</li>
+        <li><kbd>g</kbd> then a letter — navigate</li>
+      </ul>
+      <p class="muted mono" style="margin:8px 0 4px;">navigation chords:</p>
+      <ul class="kbd-list">
+        <li><kbd>g</kbd><kbd>d</kbd> dashboard · <kbd>g</kbd><kbd>s</kbd> subagents · <kbd>g</kbd><kbd>S</kbd> sessions</li>
+        <li><kbd>g</kbd><kbd>h</kbd> hooks · <kbd>g</kbd><kbd>u</kbd> usage · <kbd>g</kbd><kbd>c</kbd> crons · <kbd>g</kbd><kbd>j</kbd> jobs</li>
+        <li><kbd>g</kbd><kbd>t</kbd> tree · <kbd>g</kbd><kbd>T</kbd> timeline · <kbd>g</kbd><kbd>r</kbd> runs · <kbd>g</kbd><kbd>l</kbd> logs · <kbd>g</kbd><kbd>a</kbd> afk</li>
       </ul>
     </section>
 

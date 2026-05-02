@@ -91,6 +91,58 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// ─── Keyboard shortcuts ───────────────────────────────────────────
+// vim-ish "g <letter>" for navigation. The first key arms a 1.2s
+// window during which the second key dispatches. Skipped when the
+// user is typing into an input/textarea/contenteditable.
+const SHORTCUTS = {
+  d: "dashboard",
+  s: "subagents",
+  S: "sessions",
+  h: "hooks",
+  u: "usage",
+  c: "crons",
+  j: "jobs",
+  t: "tree",
+  l: "logs",
+  T: "timeline",
+  r: "runs",
+  a: "afk",
+  "?": "help",
+};
+let chordArmed = false;
+let chordTimer = null;
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (el.isContentEditable) return true;
+  return false;
+}
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (isTypingTarget(e.target)) return;
+  if (chordArmed) {
+    chordArmed = false;
+    clearTimeout(chordTimer);
+    const route = SHORTCUTS[e.key];
+    if (route) {
+      e.preventDefault();
+      window.location.hash = `#/${route}`;
+    }
+    return;
+  }
+  if (e.key === "g") {
+    chordArmed = true;
+    chordTimer = setTimeout(() => { chordArmed = false; }, 1200);
+    return;
+  }
+  if (e.key === "?") {
+    e.preventDefault();
+    window.location.hash = `#/help`;
+  }
+});
+
 // Click outside drawer (on the main content) closes it.
 document.getElementById("content").addEventListener("click", (e) => {
   // Only close if the click reaches an empty area, not a row click.
@@ -103,6 +155,35 @@ document.getElementById("content").addEventListener("click", (e) => {
 const toastHost = document.createElement("div");
 toastHost.id = "toast-host";
 document.body.appendChild(toastHost);
+
+// Wire the sidebar's "enable notifications" button.
+window.addEventListener("DOMContentLoaded", () => {
+  const btn = document.getElementById("notify-toggle");
+  if (!btn) return;
+  const refreshLabel = () => {
+    if (typeof Notification === "undefined") {
+      btn.textContent = "notifications n/a";
+      btn.disabled = true;
+    } else if (Notification.permission === "granted") {
+      btn.textContent = "✓ notifications on";
+      btn.classList.add("on");
+    } else if (Notification.permission === "denied") {
+      btn.textContent = "notifications blocked";
+      btn.disabled = true;
+    } else {
+      btn.textContent = "enable notifications";
+    }
+  };
+  refreshLabel();
+  btn.addEventListener("click", async () => {
+    await enableNotifications();
+    refreshLabel();
+    toast(Notification.permission === "granted"
+      ? "notifications enabled"
+      : "permission denied",
+      Notification.permission === "granted" ? "success" : "error");
+  });
+});
 
 // ─── Drawer helpers (any view can call these) ──────────────────────
 export function openDrawer({ title, body }) {
@@ -233,6 +314,64 @@ export function toast(message, variant = "") {
     setTimeout(() => el.remove(), 220);
   }, variant === "error" ? 5200 : 2400);
 }
+
+// ─── Browser notifications ────────────────────────────────────────
+// Watches /subagents on a 5s interval (independent of any view's
+// polling), tracks status transitions, and fires a desktop notification
+// when a subagent flips to a terminal state. Useful for overnight AFK
+// runs — you can leave the tab in the background and get pinged on
+// completions/failures.
+const lastStatus = new Map();
+let notifyEnabled = (typeof Notification !== "undefined") && Notification.permission === "granted";
+
+export async function enableNotifications() {
+  if (typeof Notification === "undefined") return false;
+  if (Notification.permission === "granted") {
+    notifyEnabled = true;
+    return true;
+  }
+  if (Notification.permission === "denied") return false;
+  const r = await Notification.requestPermission();
+  notifyEnabled = r === "granted";
+  return notifyEnabled;
+}
+
+const TERMINAL_LABEL = {
+  completed: "✅ completed",
+  failed: "❌ failed",
+  merge_failed: "⚠️ merge failed",
+  cancelled: "🚫 cancelled",
+};
+
+async function watchTerminalTransitions() {
+  try {
+    const rows = await fetch("/subagents?limit=200").then((r) => r.ok ? r.json() : []);
+    if (!Array.isArray(rows)) return;
+    for (const r of rows) {
+      const prev = lastStatus.get(r.id);
+      lastStatus.set(r.id, r.status);
+      // Only fire if we've seen the row before (skip first poll's
+      // historical terminal rows) and it just transitioned to terminal.
+      if (prev && prev !== r.status && TERMINAL_LABEL[r.status] && prev === "running") {
+        if (notifyEnabled) {
+          const n = new Notification(`${TERMINAL_LABEL[r.status]} · ${r.title ?? r.id.slice(0,8)}`, {
+            body: `${r.provider ?? ""} · ${r.id.slice(0, 8)}`,
+            tag: r.id,
+          });
+          n.onclick = () => {
+            window.focus();
+            window.location.hash = `#/subagents/${r.id}`;
+          };
+        }
+      }
+    }
+  } catch { /* network blip */ }
+}
+
+// Tick every 5s globally, regardless of the active view.
+setInterval(watchTerminalTransitions, 5000);
+// Prime the lastStatus map so we don't fire on first page load.
+setTimeout(watchTerminalTransitions, 1500);
 
 // LocalStorage helpers — views remember their last filters across
 // reloads. Keep keys namespaced so we don't collide with anything.

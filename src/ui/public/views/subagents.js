@@ -234,24 +234,51 @@ function paint(root, rows, selectedId, ctx, onSelect) {
   });
 }
 
+// Drawer auto-refresh — when the open subagent is still `running`, we
+// re-fetch its row + events every 4s so the user sees the events log
+// tick in real time. The interval is cleared when the drawer closes
+// (via app.closeDrawer triggering a global event we listen to here)
+// or when this view unmounts.
+let drawerRefreshTimer = null;
+let drawerCurrentId = null;
+
+function stopDrawerRefresh() {
+  if (drawerRefreshTimer) clearInterval(drawerRefreshTimer);
+  drawerRefreshTimer = null;
+  drawerCurrentId = null;
+}
+
 async function openSubagentDrawer(id, ctx) {
+  stopDrawerRefresh();
+  drawerCurrentId = id;
   const body = document.createElement("div");
   body.innerHTML = `<div class="muted mono">loading…</div>`;
   ctx.drawer({ title: id.slice(0, 8) + " · loading…", body });
 
-  try {
-    const [task, events] = await Promise.all([
-      getJSON(`/subagents/${id}`),
-      getJSON(`/subagents/${id}/events`),
-    ]);
-    paintDrawer(body, task, events);
-    ctx.drawer({
-      title: `${task.id.slice(0, 8)} · ${task.title ?? ""}`,
-      body,
-    });
-  } catch (e) {
-    body.innerHTML = `<div class="placeholder">${escapeHtml(e.message)}</div>`;
-  }
+  const refresh = async () => {
+    if (drawerCurrentId !== id) return;
+    try {
+      const [task, events] = await Promise.all([
+        getJSON(`/subagents/${id}`),
+        getJSON(`/subagents/${id}/events`),
+      ]);
+      paintDrawer(body, task, events);
+      ctx.drawer({
+        title: `${task.id.slice(0, 8)} · ${task.title ?? ""}`,
+        body,
+      });
+      // Stop polling once the row is terminal — nothing more will arrive.
+      const terminal = ["completed", "failed", "merge_failed", "cancelled"];
+      if (terminal.includes(task.status)) stopDrawerRefresh();
+    } catch (e) {
+      body.innerHTML = `<div class="placeholder">${escapeHtml(e.message)}</div>`;
+    }
+  };
+  await refresh();
+  drawerRefreshTimer = setInterval(refresh, 4000);
+
+  // If the drawer's close button is hit, stop our refresh too.
+  document.getElementById("drawer-close")?.addEventListener("click", stopDrawerRefresh, { once: true });
 }
 
 function paintDrawer(body, task, events) {

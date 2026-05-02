@@ -65,6 +65,9 @@ export async function startSubAgent(args: StartSubAgentArgs): Promise<SubAgent> 
     provider: args.provider,
     label: args.label,
   });
+  console.log(
+    `[subagents] launch sub=${sub.id.slice(0, 8)} task=${args.taskId?.slice(0, 8) ?? "-"} provider=${args.provider} parent=${parent.id.slice(0, 8)} cwd=${args.cwd ?? parent.cwd ?? "-"} label="${(args.label ?? "").slice(0, 60)}"`,
+  );
 
   // If this dispatch fulfills a sub_agent_tasks row, link the two and
   // bump the task into 'running' immediately. The provider session id
@@ -240,6 +243,9 @@ async function runChild(
   } else {
     subStore.setStatus(subId, "cancelled");
   }
+  console.log(
+    `[subagents] terminal sub=${subId.slice(0, 8)} task=${taskId?.slice(0, 8) ?? "-"} status=${meta.status}${meta.error ? ` error="${String(meta.error).slice(0, 100)}"` : ""}`,
+  );
   const resultText =
     (meta.output ?? "").trim() ||
     (meta.error ? `Run failed: ${meta.error}` : "(no output)");

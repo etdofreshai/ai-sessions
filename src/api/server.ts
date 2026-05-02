@@ -521,6 +521,9 @@ export function createApp() {
         notifySupervisor: body.notifySupervisor,
         dependsOn: body.dependsOn,
       });
+      console.log(
+        `[subagents] POST /subagents id=${task.id.slice(0, 8)} ai=${body.aiSessionId.slice(0, 8)} provider=${provider ?? "-"} planOnly=${planOnly} title="${(body.title as string).slice(0, 60)}"`,
+      );
       if (planOnly) {
         return res.json(task);
       }
@@ -793,6 +796,19 @@ export function createApp() {
         ? hookStore.listForSession(sessionId, limit)
         : hookStore.listRecent(limit),
     );
+  });
+
+  // 404 logger — surfaces stale callers (e.g. an old supervisor still
+  // POSTing /sub-agents) so we can spot "why isn't anything spawning?"
+  // from the terminal.
+  app.use((req: Request, res: Response, next: express.NextFunction) => {
+    if (res.headersSent) return next();
+    if (/^\/(sub-agent|sub-agents|sub-agent-tasks)\b/.test(req.path)) {
+      console.warn(
+        `[subagents] 404 stale path ${req.method} ${req.path} — supervisor may be on old skills (use /subagents)`,
+      );
+    }
+    next();
   });
 
   app.use((err: any, _req: Request, res: Response, _next: express.NextFunction) => {

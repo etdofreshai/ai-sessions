@@ -1091,17 +1091,21 @@ export class TelegramChannel implements Channel {
       const MAX = 30;
       for (const t of all.slice(0, MAX)) {
         const icon = STATUS_ICON[t.status] ?? "·";
-        const idle =
+        const ageSec = fmtSec(now - Date.parse(t.updatedAt));
+        const updated =
           t.status === "running"
-            ? ` idle=${fmtSec(now - Date.parse(t.updatedAt))}`
-            : "";
+            ? ` idle=${ageSec}`
+            : ` upd=${ageSec}`;
         const dur =
           t.startedAt && t.finishedAt
             ? ` dur=${fmtSec(Date.parse(t.finishedAt) - Date.parse(t.startedAt))}`
             : "";
+        const msgs = t.activityCount != null ? ` msgs=${t.activityCount}` : "";
         const prov = t.provider ? ` [${t.provider}]` : "";
         const title = (t.title ?? "").slice(0, 60);
-        lines.push(`${icon} ${t.id.slice(0, 8)}${prov} ${t.status}${idle}${dur} — ${title}`);
+        lines.push(
+          `${icon} ${t.id.slice(0, 8)}${prov} ${t.status}${updated}${dur}${msgs} — ${title}`,
+        );
       }
       if (all.length > MAX) lines.push("", `(showing ${MAX} of ${all.length})`);
       await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });

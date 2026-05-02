@@ -261,4 +261,12 @@ export const migrations: string[] = [
   `
   ALTER TABLE sub_agent_tasks ADD COLUMN notify_supervisor INTEGER NOT NULL DEFAULT 1;
   `,
+
+  // 10. sub_agent_tasks.activity_count — bumped on every touchActivity.
+  // Cheap "is this thing actually doing anything?" signal that the
+  // /subagents Telegram view surfaces alongside updated_at so a user
+  // glancing at the list can tell movement from stalled at a glance.
+  `
+  ALTER TABLE sub_agent_tasks ADD COLUMN activity_count INTEGER NOT NULL DEFAULT 0;
+  `,
 ];

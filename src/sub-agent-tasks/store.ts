@@ -29,6 +29,7 @@ interface TaskRow {
   max_attempts: number;
   timeout_seconds: number;
   notify_supervisor: number;
+  activity_count: number;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -72,6 +73,7 @@ function fromTaskRow(r: TaskRow): SubAgentTask {
     maxAttempts: r.max_attempts,
     timeoutSeconds: r.timeout_seconds,
     notifySupervisor: r.notify_supervisor !== 0,
+    activityCount: r.activity_count,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     startedAt: r.started_at ?? undefined,
@@ -305,7 +307,10 @@ export function markStarted(args: {
 export function touchActivity(id: string, message?: string): void {
   const now = new Date().toISOString();
   db().prepare(
-    `UPDATE sub_agent_tasks SET updated_at = ? WHERE id = ?`,
+    `UPDATE sub_agent_tasks
+        SET updated_at = ?,
+            activity_count = activity_count + 1
+      WHERE id = ?`,
   ).run(now, id);
   appendEventInternal(id, "activity", message);
 }

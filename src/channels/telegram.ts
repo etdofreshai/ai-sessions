@@ -67,6 +67,7 @@ const SLASH_COMMANDS = [
   { command: "version", description: "Show server's git commit, or git status of a path: /version [<dir>]" },
   { command: "ls", description: "List files in a directory on the server: /ls [<dir>]" },
   { command: "subagents", description: "List subagents for the bound session with status + idle" },
+  { command: "workspace", description: "Sync the workspace repo: /workspace pull | push" },
 ];
 
 interface PendingBinding {
@@ -1109,6 +1110,60 @@ export class TelegramChannel implements Channel {
       }
       if (all.length > MAX) lines.push("", `(showing ${MAX} of ${all.length})`);
       await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
+      return true;
+    }
+
+    if (cmd === "/workspace") {
+      const sub = arg.trim().toLowerCase().split(/\s+/)[0];
+      if (sub !== "pull" && sub !== "push") {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: "Usage: /workspace pull | /workspace push",
+        });
+        return true;
+      }
+      const { workspaceDir } = await import("../config.js");
+      const wsDir = workspaceDir();
+      const { spawn } = await import("node:child_process");
+      const args =
+        sub === "pull"
+          ? ["pull", "--rebase", "--autostash"]
+          : ["push"];
+      const stopTyping = this.startTyping(chatId);
+      const run = (): Promise<{ code: number; out: string }> =>
+        new Promise((resolve) => {
+          const child = spawn("git", args, {
+            cwd: wsDir,
+            shell: false,
+            env: process.env,
+          });
+          let buf = "";
+          child.stdout.on("data", (d) => (buf += d.toString()));
+          child.stderr.on("data", (d) => (buf += d.toString()));
+          const timer = setTimeout(() => {
+            try { child.kill("SIGKILL"); } catch { /* ignore */ }
+            resolve({ code: 124, out: buf + "\n[timed out after 60s]" });
+          }, 60_000);
+          child.on("error", (e) => {
+            clearTimeout(timer);
+            resolve({ code: 127, out: buf + `\n[spawn error: ${e.message}]` });
+          });
+          child.on("exit", (code) => {
+            clearTimeout(timer);
+            resolve({ code: code ?? 0, out: buf });
+          });
+        });
+      try {
+        const { code, out } = await run();
+        const trimmed = (out || "(no output)").trim().slice(0, 3500);
+        const icon = code === 0 ? "✅" : "❌";
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `${icon} git ${args.join(" ")} (cwd=${wsDir}, exit=${code})\n\n${trimmed}`,
+        });
+      } finally {
+        stopTyping();
+      }
       return true;
     }
 

@@ -13,16 +13,22 @@ import { mount as mountCrons     } from "/ui/views/crons.js";
 import { mount as mountJobs      } from "/ui/views/jobs.js";
 import { mount as mountTree      } from "/ui/views/tree.js";
 import { mount as mountLogs      } from "/ui/views/logs.js";
+import { mount as mountSession   } from "/ui/views/session.js";
+import { mount as mountHelp      } from "/ui/views/help.js";
+import { mount as mountAfk       } from "/ui/views/afk.js";
 
 const ROUTES = {
   subagents: { mount: mountSubagents, title: "Subagents" },
   sessions:  { mount: mountSessions,  title: "Sessions" },
+  session:   { mount: mountSession,   title: "Session" },
   hooks:     { mount: mountHooks,     title: "Hooks" },
   usage:     { mount: mountUsage,     title: "Usage" },
   crons:     { mount: mountCrons,     title: "Crons" },
   jobs:      { mount: mountJobs,      title: "Jobs" },
   tree:      { mount: mountTree,      title: "Tree" },
   logs:      { mount: mountLogs,      title: "Logs" },
+  afk:       { mount: mountAfk,       title: "AFK" },
+  help:      { mount: mountHelp,      title: "Help" },
 };
 
 const content = document.getElementById("content");
@@ -150,10 +156,28 @@ export function statusBadge(status) {
   return `<span class="badge ${cls}"><span class="dot-status"></span>${escapeHtml(status)}</span>`;
 }
 
+// Reconnect banner — flips on after consecutive fetch failures and
+// flips off as soon as one succeeds. Surfaces transient API outages
+// without scaring the user on every blip.
+let consecutiveFails = 0;
+function setReconnect(state) {
+  document.body.classList.toggle("reconnecting", state);
+}
 export async function getJSON(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${url}`);
-  return r.json();
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${url}`);
+    const json = await r.json();
+    if (consecutiveFails > 0) {
+      consecutiveFails = 0;
+      setReconnect(false);
+    }
+    return json;
+  } catch (e) {
+    consecutiveFails++;
+    if (consecutiveFails >= 2) setReconnect(true);
+    throw e;
+  }
 }
 
 // Used by views to set up a polling loop with auto-cleanup.

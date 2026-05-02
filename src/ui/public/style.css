@@ -550,6 +550,132 @@ table.data td.spark {
   to   { transform: translateY(0);   opacity: 1; }
 }
 
+/* ─── Transcript (session detail) ────────────────────────────────── */
+.transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 900px;
+}
+.msg {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-1);
+  padding: 10px 14px;
+}
+.msg-user      { border-left: 3px solid var(--accent-2); }
+.msg-assistant { border-left: 3px solid var(--accent); }
+.msg-system    { border-left: 3px solid var(--muted); }
+.msg-head {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.msg-body {
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  color: var(--text);
+  max-height: 320px;
+  overflow: auto;
+}
+
+/* ─── Help page ──────────────────────────────────────────────────── */
+.help-section {
+  max-width: 760px;
+  margin-bottom: 28px;
+}
+.help-section h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-1);
+  font-family: var(--mono);
+  font-weight: 500;
+  margin: 0 0 10px;
+}
+.help-section ul { padding-left: 18px; margin: 0; }
+.help-section li { margin-bottom: 6px; }
+.help-section code {
+  background: var(--bg-2);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.kbd-list { list-style: none; padding: 0; }
+.kbd-list li { margin-bottom: 4px; }
+.kbd-list kbd {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-1);
+  margin-right: 6px;
+}
+
+/* ─── AFK quick-start ────────────────────────────────────────────── */
+.afk-form { max-width: 720px; margin-bottom: 16px; }
+.afk-form .form-row { margin-bottom: 12px; }
+.rotation-strip {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 6px;
+  max-width: 720px;
+  margin-bottom: 14px;
+}
+.rotation-strip .slot {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 6px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.rotation-strip .slot small {
+  font-size: 10px;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.rotation-strip .slot.s-glm    { border-color: var(--accent);   color: var(--accent); }
+.rotation-strip .slot.s-codex  { border-color: var(--accent-2); color: var(--accent-2); }
+.rotation-strip .slot.s-claude { border-color: var(--warn);     color: var(--warn); }
+
+button.danger { color: var(--bad); border-color: var(--bad); }
+
+/* ─── Reconnect indicator ────────────────────────────────────────── */
+#reconnect-banner {
+  position: fixed;
+  top: 0;
+  left: 220px;
+  right: 0;
+  background: var(--bad);
+  color: var(--bg);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 6px 14px;
+  z-index: 60;
+  display: none;
+  text-align: center;
+}
+body.reconnecting #reconnect-banner { display: block; }
+body.reconnecting #content { padding-top: 40px; }
+
 /* ─── Log lines ──────────────────────────────────────────────────── */
 .log-tail {
   background: var(--bg);

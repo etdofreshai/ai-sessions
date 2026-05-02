@@ -36,19 +36,26 @@ export function mount(root) {
         </thead>
         <tbody>
           ${rows.map((s) => `
-            <tr class="row">
+            <tr class="row" data-id="${escapeHtml(s.id)}">
               <td class="mono" title="${escapeHtml(s.id)}">${escapeHtml(s.id.slice(0, 8))}</td>
               <td class="title" title="${escapeHtml(s.name ?? "")}">${escapeHtml(s.name ?? "—")}</td>
               <td class="mono">${escapeHtml(s.provider)}</td>
               <td class="mono" title="${escapeHtml(s.cwd ?? "")}">${escapeHtml(s.cwd ?? "—")}</td>
               <td class="mono" title="${escapeHtml(fmtAbs(s.updatedAt))}">${fmtAge(s.updatedAt)}</td>
               <td class="mono" title="${escapeHtml(fmtAbs(s.createdAt))}">${fmtAge(s.createdAt)}</td>
-              <td><a href="#/subagents/${escapeHtml(s.id)}">subagents →</a></td>
+              <td><a href="#/session/${escapeHtml(s.id)}">open →</a></td>
             </tr>
           `).join("")}
         </tbody>
       </table>
     `;
+    root.querySelectorAll("tr.row").forEach((tr) => {
+      tr.addEventListener("click", (e) => {
+        // Allow clicking the explicit "open →" link without double-navigation.
+        if (e.target.closest("a")) return;
+        window.location.hash = `#/session/${tr.dataset.id}`;
+      });
+    });
   };
   return poll(rerender, 6000);
 }

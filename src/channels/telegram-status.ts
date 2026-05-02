@@ -78,10 +78,16 @@ export async function openStatusBlock(
   const trimLines = (): void => {
     if (lines.length <= MAX_LINES) return;
     const dropCount = lines.length - MAX_LINES;
-    lines.splice(0, dropCount);
+    // Pin line 0 as a header once any caller has pushed real content. The
+    // placeholder is the only line we'd ever drop from the top; after the
+    // first push() runs dropPlaceholder, lines[0] is the bubble's header
+    // (e.g. "🤖 sub-agent abc12345 (label) · codex") and should stay
+    // visible even as older tool lines age out.
+    const startIdx = lines[0] === PLACEHOLDER ? 0 : 1;
+    lines.splice(startIdx, dropCount);
     if (currentTextIdx != null) {
       currentTextIdx -= dropCount;
-      if (currentTextIdx < 0) currentTextIdx = null;
+      if (currentTextIdx < startIdx) currentTextIdx = null;
     }
   };
 

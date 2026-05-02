@@ -471,78 +471,23 @@ export function createApp() {
     }
   });
 
-  // Sub-agents — HTTP equivalents of `ais sub-agents`.
-  app.post("/sub-agents", async (req, res, next) => {
-    try {
-      const { startSubAgent } = await import("../sub-agents/runner.js");
-      const { parentAiSessionId, provider, prompt, cwd, label, steerChatId } = req.body ?? {};
-      const parent = validateAiSessionId(parentAiSessionId, "parentAiSessionId");
-      if (!parent.ok) return res.status(parent.status).json({ error: parent.error });
-      if (!provider) return res.status(400).json({ error: "provider required" });
-      if (!prompt) return res.status(400).json({ error: "prompt required" });
-      const sub = await startSubAgent({ parentAiSessionId, provider, prompt, cwd, label, steerChatId });
-      res.json(sub);
-    } catch (e: any) {
-      // startSubAgent throws on policy violations (one-level-deep, unknown
-      // provider, missing parent) — surface those as 400 not 500.
-      const msg = e?.message ?? String(e);
-      if (/^one-level-deep|^unknown provider|not found/i.test(msg)) {
-        return res.status(400).json({ error: msg });
-      }
-      next(e);
-    }
-  });
-
-  app.get("/sub-agents", async (req, res, next) => {
-    try {
-      const subStore = await import("../sub-agents/store.js");
-      const parentAiSessionId = req.query.parent as string | undefined;
-      const parent = validateAiSessionId(parentAiSessionId, "parent");
-      if (!parent.ok) return res.status(parent.status).json({ error: parent.error });
-      res.json(subStore.listByParent(parentAiSessionId as string).map(decorate));
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  app.get("/sub-agents/:id", async (req, res, next) => {
-    try {
-      const subStore = await import("../sub-agents/store.js");
-      const sub = subStore.read(req.params.id);
-      if (!sub) return res.status(404).json({ error: "sub-agent not found" });
-      res.json(decorate(sub));
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  // Cancel a running/pending sub-agent: interrupt the child's run handle if
-  // it's registered and mark the row cancelled. The runner's drain loop
-  // observes the abort and finalizes the bubble normally.
-  app.post("/sub-agents/:id/cancel", async (req, res, next) => {
-    try {
-      const subStore = await import("../sub-agents/store.js");
-      const { cancelSubAgent } = await import("../sub-agents/runner.js");
-      const sub = subStore.read(req.params.id);
-      if (!sub) return res.status(404).json({ error: "sub-agent not found" });
-      if (sub.status !== "running" && sub.status !== "pending") {
-        return res.status(409).json({ error: `sub-agent already ${sub.status}` });
-      }
-      const ok = cancelSubAgent(sub.id);
-      res.json({ ok, status: subStore.read(sub.id)?.status });
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  // ─── Sub-agent tasks ────────────────────────────────────────────────────
-  // Supervisor-driven task queue. The supervisor LLM owns judgment (which
-  // tasks to create, dependencies, retry policy, merge resolution); the
-  // server owns deterministic mechanics (storage, dependency resolution,
-  // stale detection, event log). See plan in commit message.
-  app.post("/sub-agent-tasks", async (req, res, next) => {
+  // ─── Subagents (unified surface) ────────────────────────────────────────
+  // The single public surface for delegated work. A subagent is durable:
+  // it lives in sub_agent_tasks (status, deps, events) and, when running,
+  // is backed by an internal sub_agents row that handles the actual
+  // provider session + hook routing. The supervisor LLM owns judgment
+  // (creating subagents, dependencies, retries, merge resolution); the
+  // server owns deterministic mechanics (storage, dependency gating,
+  // stale detection, event log).
+  //
+  // Default behavior of POST /subagents is "create + immediately
+  // dispatch" — matches the old POST /sub-agents one-shot UX. Pass
+  // ?planOnly=1 to create the row without launching, e.g. when staging a
+  // multi-step plan with dependsOn.
+  app.post("/subagents", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
+      const { startSubAgent } = await import("../sub-agents/runner.js");
       const body = req.body ?? {};
       const ai = validateAiSessionId(body.aiSessionId, "aiSessionId");
       if (!ai.ok) return res.status(ai.status).json({ error: ai.error });
@@ -553,13 +498,18 @@ export function createApp() {
         return res.status(400).json({ error: "prompt required" });
       }
       if (body.dependsOn !== undefined && !Array.isArray(body.dependsOn)) {
-        return res.status(400).json({ error: "dependsOn must be an array of task ids" });
+        return res.status(400).json({ error: "dependsOn must be an array of subagent ids" });
+      }
+      const planOnly = req.query.planOnly === "1" || body.planOnly === true;
+      const provider = body.provider as string | undefined;
+      if (!planOnly && !provider) {
+        return res.status(400).json({ error: "provider required (or pass ?planOnly=1)" });
       }
       const task = taskStore.create({
         aiSessionId: body.aiSessionId,
         title: body.title,
         prompt: body.prompt,
-        provider: body.provider,
+        provider,
         effort: body.effort,
         cwd: body.cwd,
         baseRef: body.baseRef,
@@ -570,13 +520,44 @@ export function createApp() {
         timeoutSeconds: body.timeoutSeconds,
         dependsOn: body.dependsOn,
       });
-      res.json(task);
+      if (planOnly) {
+        return res.json(task);
+      }
+      // Refuse immediate dispatch if any dependency isn't completed yet.
+      const deps = taskStore.listDependencies(task.id);
+      for (const d of deps) {
+        const dep = taskStore.read(d.dependsOnTaskId);
+        if (!dep || dep.status !== "completed") {
+          return res.status(409).json({
+            error: `dependency ${d.dependsOnTaskId} is ${dep?.status ?? "missing"}; create with ?planOnly=1 and dispatch later`,
+            task,
+          });
+        }
+      }
+      try {
+        const sub = await startSubAgent({
+          parentAiSessionId: body.aiSessionId,
+          provider: provider as string,
+          prompt: body.prompt,
+          cwd: task.worktreePath ?? task.cwd,
+          label: body.title,
+          taskId: task.id,
+          steerChatId: body.steerChatId,
+        });
+        res.json({ task: taskStore.read(task.id), subAgent: sub });
+      } catch (e: any) {
+        const msg = e?.message ?? String(e);
+        if (/^one-level-deep|^unknown provider|not found/i.test(msg)) {
+          return res.status(400).json({ error: msg, task });
+        }
+        throw e;
+      }
     } catch (e) {
       next(e);
     }
   });
 
-  app.get("/sub-agent-tasks", async (req, res, next) => {
+  app.get("/subagents", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const aiSessionId = req.query.aiSessionId as string | undefined;
@@ -596,7 +577,7 @@ export function createApp() {
     }
   });
 
-  app.get("/sub-agent-tasks/runnable", async (req, res, next) => {
+  app.get("/subagents/runnable", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const aiSessionId = req.query.aiSessionId as string | undefined;
@@ -608,22 +589,22 @@ export function createApp() {
     }
   });
 
-  app.get("/sub-agent-tasks/:id", async (req, res, next) => {
+  app.get("/subagents/:id", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const task = taskStore.read(req.params.id);
-      if (!task) return res.status(404).json({ error: "task not found" });
+      if (!task) return res.status(404).json({ error: "subagent not found" });
       res.json(task);
     } catch (e) {
       next(e);
     }
   });
 
-  app.patch("/sub-agent-tasks/:id", async (req, res, next) => {
+  app.patch("/subagents/:id", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const existing = taskStore.read(req.params.id);
-      if (!existing) return res.status(404).json({ error: "task not found" });
+      if (!existing) return res.status(404).json({ error: "subagent not found" });
       const updated = taskStore.update(req.params.id, req.body ?? {});
       res.json(updated);
     } catch (e) {
@@ -631,11 +612,11 @@ export function createApp() {
     }
   });
 
-  app.delete("/sub-agent-tasks/:id", async (req, res, next) => {
+  app.delete("/subagents/:id", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const task = taskStore.read(req.params.id);
-      if (!task) return res.status(404).json({ error: "task not found" });
+      if (!task) return res.status(404).json({ error: "subagent not found" });
       taskStore.softDelete(req.params.id);
       res.json({ ok: true });
     } catch (e) {
@@ -643,20 +624,20 @@ export function createApp() {
     }
   });
 
-  // Dispatch a task: launch a sub-agent for it. Picks provider from
-  // request body, falling back to the task's stored provider field.
-  app.post("/sub-agent-tasks/:id/dispatch", async (req, res, next) => {
+  // Launch a previously-created (planOnly) subagent. Picks provider from
+  // request body, falling back to the row's stored provider field.
+  app.post("/subagents/:id/dispatch", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const { startSubAgent } = await import("../sub-agents/runner.js");
       const task = taskStore.read(req.params.id);
-      if (!task) return res.status(404).json({ error: "task not found" });
-      if (task.deletedAt) return res.status(409).json({ error: "task is deleted" });
+      if (!task) return res.status(404).json({ error: "subagent not found" });
+      if (task.deletedAt) return res.status(409).json({ error: "subagent is deleted" });
       if (task.status !== "created" && task.status !== "merge_failed") {
-        return res.status(409).json({ error: `task is ${task.status}; only created/merge_failed can be dispatched` });
+        return res.status(409).json({ error: `subagent is ${task.status}; only created/merge_failed can be dispatched` });
       }
       const provider = (req.body?.provider as string | undefined) ?? task.provider;
-      if (!provider) return res.status(400).json({ error: "provider required (not set on task and not in body)" });
+      if (!provider) return res.status(400).json({ error: "provider required (not set on subagent and not in body)" });
       const deps = taskStore.listDependencies(task.id);
       for (const d of deps) {
         const dep = taskStore.read(d.dependsOnTaskId);
@@ -674,7 +655,7 @@ export function createApp() {
         label: task.title,
         taskId: task.id,
       });
-      res.json({ task: taskStore.read(task.id), subAgent: sub });
+      res.json({ subagent: taskStore.read(task.id), runtime: sub });
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       if (/^one-level-deep|^unknown provider|not found/i.test(msg)) {
@@ -684,23 +665,20 @@ export function createApp() {
     }
   });
 
-  app.post("/sub-agent-tasks/:id/cancel", async (req, res, next) => {
+  app.post("/subagents/:id/cancel", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const { cancelSubAgent } = await import("../sub-agents/runner.js");
       const task = taskStore.read(req.params.id);
-      if (!task) return res.status(404).json({ error: "task not found" });
+      if (!task) return res.status(404).json({ error: "subagent not found" });
       if (
         task.status === "completed" ||
         task.status === "failed" ||
         task.status === "cancelled"
       ) {
-        return res.status(409).json({ error: `task already ${task.status}` });
+        return res.status(409).json({ error: `subagent already ${task.status}` });
       }
       const reason = (req.body?.reason as string | undefined) ?? "cancelled by request";
-      // If the task is running and tied to a sub-agent, interrupt that
-      // sub-agent first; the runner's terminal-status path will mirror
-      // the status onto the task. Otherwise just mark the row directly.
       if (task.status === "running" && task.subAgentId) {
         cancelSubAgent(task.subAgentId);
       }
@@ -711,11 +689,11 @@ export function createApp() {
     }
   });
 
-  app.post("/sub-agent-tasks/:id/complete", async (req, res, next) => {
+  app.post("/subagents/:id/complete", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const task = taskStore.read(req.params.id);
-      if (!task) return res.status(404).json({ error: "task not found" });
+      if (!task) return res.status(404).json({ error: "subagent not found" });
       taskStore.complete(req.params.id, req.body?.response);
       res.json(taskStore.read(req.params.id));
     } catch (e) {
@@ -723,11 +701,11 @@ export function createApp() {
     }
   });
 
-  app.post("/sub-agent-tasks/:id/fail", async (req, res, next) => {
+  app.post("/subagents/:id/fail", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const task = taskStore.read(req.params.id);
-      if (!task) return res.status(404).json({ error: "task not found" });
+      if (!task) return res.status(404).json({ error: "subagent not found" });
       taskStore.fail(req.params.id, req.body?.response);
       res.json(taskStore.read(req.params.id));
     } catch (e) {
@@ -735,11 +713,11 @@ export function createApp() {
     }
   });
 
-  app.post("/sub-agent-tasks/:id/merge-failed", async (req, res, next) => {
+  app.post("/subagents/:id/merge-failed", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const task = taskStore.read(req.params.id);
-      if (!task) return res.status(404).json({ error: "task not found" });
+      if (!task) return res.status(404).json({ error: "subagent not found" });
       const response = req.body?.response;
       if (typeof response !== "string" || !response.trim()) {
         return res.status(400).json({ error: "response required (merge error details)" });
@@ -751,11 +729,11 @@ export function createApp() {
     }
   });
 
-  app.post("/sub-agent-tasks/:id/dependencies", async (req, res, next) => {
+  app.post("/subagents/:id/dependencies", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const task = taskStore.read(req.params.id);
-      if (!task) return res.status(404).json({ error: "task not found" });
+      if (!task) return res.status(404).json({ error: "subagent not found" });
       const dependsOnTaskId = req.body?.dependsOnTaskId;
       if (typeof dependsOnTaskId !== "string" || !dependsOnTaskId) {
         return res.status(400).json({ error: "dependsOnTaskId required" });
@@ -772,7 +750,7 @@ export function createApp() {
     }
   });
 
-  app.delete("/sub-agent-tasks/:id/dependencies/:depId", async (req, res, next) => {
+  app.delete("/subagents/:id/dependencies/:depId", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const removed = taskStore.removeDependency(req.params.id, req.params.depId);
@@ -783,22 +761,22 @@ export function createApp() {
     }
   });
 
-  app.get("/sub-agent-tasks/:id/dependencies", async (req, res, next) => {
+  app.get("/subagents/:id/dependencies", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const task = taskStore.read(req.params.id);
-      if (!task) return res.status(404).json({ error: "task not found" });
+      if (!task) return res.status(404).json({ error: "subagent not found" });
       res.json(taskStore.listDependencies(req.params.id));
     } catch (e) {
       next(e);
     }
   });
 
-  app.get("/sub-agent-tasks/:id/events", async (req, res, next) => {
+  app.get("/subagents/:id/events", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");
       const task = taskStore.read(req.params.id);
-      if (!task) return res.status(404).json({ error: "task not found" });
+      if (!task) return res.status(404).json({ error: "subagent not found" });
       const limit = Math.min(Number(req.query.limit ?? 200), 1000) || 200;
       res.json(taskStore.listEvents(req.params.id, limit));
     } catch (e) {

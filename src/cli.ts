@@ -486,33 +486,64 @@ jobs
     console.log("cancelled");
   });
 
+// `subagents` is the canonical command group. The CLI talks to the same
+// task store + runner the HTTP /subagents surface uses, so behavior is
+// identical: `start` defaults to create+dispatch (one-shot), `--plan-only`
+// stages a row without launching for a deferred dispatch later.
 const subagents = program
-  .command("sub-agents")
-  .alias("subagents")
-  .description("Manage parent ↔ sub-agent AiSession relationships");
+  .command("subagents")
+  .alias("sub-agents")
+  .description("Create, list, and inspect subagents (delegated work units)");
 
 subagents
   .command("start <provider>")
-  .description("Spawn a sub-agent of the parent AiSession")
+  .description("Create + dispatch a subagent (one-shot). Use --plan-only to stage without launching.")
   .requiredOption("--parent <id>", "parent AiSession id")
-  .requiredOption("--prompt <p>", "first user message for the sub-agent")
+  .requiredOption("--prompt <p>", "first user message for the subagent")
+  .option("--title <s>", "short title (defaults to prompt's first line)")
   .option("--cwd <dir>", "working directory (defaults to parent's cwd)")
-  .option("--label <s>", "human-friendly label")
+  .option("--label <s>", "alias of --title (back-compat)")
   .option("--steer-chat <n>", "Telegram chat id to direct-bind for independent steering", (v) => parseInt(v, 10))
-  .option("--json", "print full SubAgent row instead of just the id")
+  .option("--plan-only", "create the row but don't dispatch yet")
+  .option("--depends-on <ids>", "comma-separated subagent ids this one depends on")
+  .option("--max-attempts <n>", "retry budget", (v) => parseInt(v, 10))
+  .option("--timeout-seconds <n>", "stale timeout", (v) => parseInt(v, 10))
+  .option("--json", "print full row instead of just the id")
   .action(async (provider: string, opts: any) => {
+    const taskStore = await import("./sub-agent-tasks/store.js");
     const { startSubAgent } = await import("./sub-agents/runner.js");
+    const title = (opts.title ?? opts.label ?? String(opts.prompt).split(/\r?\n/)[0]).slice(0, 120);
+    const dependsOn = opts.dependsOn
+      ? String(opts.dependsOn).split(",").map((s: string) => s.trim()).filter(Boolean)
+      : undefined;
     try {
+      const task = taskStore.create({
+        aiSessionId: opts.parent,
+        title,
+        prompt: opts.prompt,
+        provider,
+        cwd: opts.cwd,
+        dependsOn,
+        maxAttempts: opts.maxAttempts,
+        timeoutSeconds: opts.timeoutSeconds,
+      });
+      if (opts.planOnly) {
+        if (opts.json) console.log(JSON.stringify(task, null, 2));
+        else console.log(task.id);
+        return;
+      }
       const sub = await startSubAgent({
         parentAiSessionId: opts.parent,
         provider,
         prompt: opts.prompt,
         cwd: opts.cwd,
-        label: opts.label,
+        label: title,
+        taskId: task.id,
         steerChatId: opts.steerChat,
       });
-      if (opts.json) console.log(JSON.stringify(sub, null, 2));
-      else console.log(sub.id);
+      const fresh = taskStore.read(task.id);
+      if (opts.json) console.log(JSON.stringify({ subagent: fresh, runtime: sub }, null, 2));
+      else console.log(task.id);
     } catch (e: any) {
       console.error(e?.message ?? e);
       process.exit(1);
@@ -521,35 +552,38 @@ subagents
 
 subagents
   .command("ls")
-  .description("List sub-agents for a parent")
+  .description("List subagents for a parent AiSession")
   .requiredOption("--parent <id>", "parent AiSession id")
+  .option("--status <s>", "filter by status (created/running/completed/failed/cancelled/merge_failed)")
   .option("--json", "output JSON")
-  .action(async (opts: { parent: string; json?: boolean }) => {
-    const subStore = await import("./sub-agents/store.js");
-    const all = subStore.listByParent(opts.parent);
+  .action(async (opts: { parent: string; status?: string; json?: boolean }) => {
+    const taskStore = await import("./sub-agent-tasks/store.js");
+    const all = taskStore.list({
+      aiSessionId: opts.parent,
+      status: opts.status as never,
+    });
     if (opts.json) {
       console.log(JSON.stringify(all, null, 2));
       return;
     }
-    for (const s of all) {
+    for (const t of all) {
       console.log(
-        `${s.createdAt}  ${s.id.slice(0, 8)}  ${s.status.padEnd(10)}  ${s.provider}` +
-          `${s.label ? `  — ${s.label}` : ""}`,
+        `${t.createdAt}  ${t.id.slice(0, 8)}  ${t.status.padEnd(13)}  ${t.provider ?? "-"}  — ${t.title}`,
       );
     }
   });
 
 subagents
   .command("show <id>")
-  .description("Show one sub-agent in full")
+  .description("Show one subagent in full")
   .action(async (id: string) => {
-    const subStore = await import("./sub-agents/store.js");
-    const s = subStore.read(id);
-    if (!s) {
-      console.error(`sub-agent not found: ${id}`);
+    const taskStore = await import("./sub-agent-tasks/store.js");
+    const t = taskStore.read(id);
+    if (!t) {
+      console.error(`subagent not found: ${id}`);
       process.exit(1);
     }
-    console.log(JSON.stringify(s, null, 2));
+    console.log(JSON.stringify(t, null, 2));
   });
 
 program

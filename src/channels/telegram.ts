@@ -66,6 +66,7 @@ const SLASH_COMMANDS = [
   { command: "cron", description: "Manage scheduled prompts on this chat: /cron add|ls|rm" },
   { command: "version", description: "Show server's git commit, or git status of a path: /version [<dir>]" },
   { command: "ls", description: "List files in a directory on the server: /ls [<dir>]" },
+  { command: "subagents", description: "List subagents for the bound session with status + idle" },
 ];
 
 interface PendingBinding {
@@ -1025,6 +1026,84 @@ export class TelegramChannel implements Channel {
         "",
         ...shown.map((e) => (e.isDirectory() ? `📁 ${e.name}/` : `📄 ${e.name}`)),
       ];
+      await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
+      return true;
+    }
+
+    if (cmd === "/subagents") {
+      const ai = aiStore.findByTelegramChat(chatId);
+      if (!ai) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: "Not bound. Send /bind to pick a Session first.",
+        });
+        return true;
+      }
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const all = taskStore.list({ aiSessionId: ai.id });
+      if (!all.length) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: `No subagents for session ${ai.id.slice(0, 8)}.`,
+        });
+        return true;
+      }
+      const now = Date.now();
+      const STATUS_ICON: Record<string, string> = {
+        created: "⏸",
+        running: "▶️",
+        completed: "✅",
+        failed: "❌",
+        merge_failed: "⚠️",
+        cancelled: "🚫",
+      };
+      const fmtSec = (ms: number): string => {
+        const s = Math.floor(ms / 1000);
+        if (s < 60) return `${s}s`;
+        if (s < 3600) return `${Math.floor(s / 60)}m`;
+        return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
+      };
+      // Sort: running first, then created, then terminal — newest first within each.
+      const order: Record<string, number> = {
+        running: 0,
+        created: 1,
+        merge_failed: 2,
+        failed: 3,
+        cancelled: 4,
+        completed: 5,
+      };
+      all.sort((a, b) => {
+        const oa = order[a.status] ?? 9;
+        const ob = order[b.status] ?? 9;
+        if (oa !== ob) return oa - ob;
+        return b.createdAt.localeCompare(a.createdAt);
+      });
+      const lines: string[] = [
+        `Subagents for session ${ai.id.slice(0, 8)} (${all.length}):`,
+        "",
+      ];
+      const counts: Record<string, number> = {};
+      for (const t of all) counts[t.status] = (counts[t.status] ?? 0) + 1;
+      const summary = Object.entries(counts)
+        .map(([s, n]) => `${STATUS_ICON[s] ?? "·"} ${s}=${n}`)
+        .join("  ");
+      lines.push(summary, "");
+      const MAX = 30;
+      for (const t of all.slice(0, MAX)) {
+        const icon = STATUS_ICON[t.status] ?? "·";
+        const idle =
+          t.status === "running"
+            ? ` idle=${fmtSec(now - Date.parse(t.updatedAt))}`
+            : "";
+        const dur =
+          t.startedAt && t.finishedAt
+            ? ` dur=${fmtSec(Date.parse(t.finishedAt) - Date.parse(t.startedAt))}`
+            : "";
+        const prov = t.provider ? ` [${t.provider}]` : "";
+        const title = (t.title ?? "").slice(0, 60);
+        lines.push(`${icon} ${t.id.slice(0, 8)}${prov} ${t.status}${idle}${dur} — ${title}`);
+      }
+      if (all.length > MAX) lines.push("", `(showing ${MAX} of ${all.length})`);
       await api.sendMessage({ chat_id: chatId, text: lines.join("\n") });
       return true;
     }

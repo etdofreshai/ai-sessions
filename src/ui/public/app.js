@@ -13,6 +13,8 @@ import { mount as mountUsage     } from "/ui/views/usage.js";
 import { mount as mountCrons     } from "/ui/views/crons.js";
 import { mount as mountJobs      } from "/ui/views/jobs.js";
 import { mount as mountTree      } from "/ui/views/tree.js";
+import { mount as mountTimeline  } from "/ui/views/timeline.js";
+import { mount as mountRuns      } from "/ui/views/runs.js";
 import { mount as mountLogs      } from "/ui/views/logs.js";
 import { mount as mountSession   } from "/ui/views/session.js";
 import { mount as mountHelp      } from "/ui/views/help.js";
@@ -28,6 +30,8 @@ const ROUTES = {
   crons:     { mount: mountCrons,     title: "Crons" },
   jobs:      { mount: mountJobs,      title: "Jobs" },
   tree:      { mount: mountTree,      title: "Tree" },
+  timeline:  { mount: mountTimeline,  title: "Timeline" },
+  runs:      { mount: mountRuns,      title: "Runs" },
   logs:      { mount: mountLogs,      title: "Logs" },
   afk:       { mount: mountAfk,       title: "AFK" },
   help:      { mount: mountHelp,      title: "Help" },

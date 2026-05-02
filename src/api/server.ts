@@ -221,6 +221,47 @@ export function createApp() {
     res.json(listRunIds().map((id) => ({ runId: id })));
   });
 
+  // Aggregate runs across all providers, ordered newest first. Used by
+  // the dashboard's Runs view. Lightweight — runs table is bounded by
+  // workload, indexed on created_at DESC.
+  app.get("/runs", async (req, res, next) => {
+    try {
+      const { db } = await import("../db/index.js");
+      const limit = Math.min(Number(req.query.limit ?? 200), 1000) || 200;
+      const aiSessionId = req.query.aiSessionId as string | undefined;
+      const status = req.query.status as string | undefined;
+      const where: string[] = [];
+      const params: unknown[] = [];
+      if (aiSessionId) { where.push("ai_session_id = ?"); params.push(aiSessionId); }
+      if (status) { where.push("status = ?"); params.push(status); }
+      const sql =
+        `SELECT run_id, provider, session_id, ai_session_id, status, prompt, cwd,
+                yolo, internal, created_at, ended_at,
+                CASE WHEN length(output) > 240 THEN substr(output, 1, 240) || '…' ELSE output END AS output_preview,
+                error
+           FROM runs ${where.length ? "WHERE " + where.join(" AND ") : ""}
+          ORDER BY created_at DESC LIMIT ?`;
+      const rows = db().prepare(sql).all(...params, limit) as Array<Record<string, unknown>>;
+      res.json(rows.map((r) => ({
+        runId: r.run_id,
+        provider: r.provider,
+        sessionId: r.session_id,
+        aiSessionId: r.ai_session_id,
+        status: r.status,
+        prompt: r.prompt,
+        cwd: r.cwd,
+        yolo: !!r.yolo,
+        internal: !!r.internal,
+        createdAt: r.created_at,
+        endedAt: r.ended_at,
+        outputPreview: r.output_preview,
+        error: r.error,
+      })));
+    } catch (e) {
+      next(e);
+    }
+  });
+
   app.get("/providers/:provider/runs/:runId", (req, res) => {
     const live = getLive(req.params.runId);
     if (live) {

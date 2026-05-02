@@ -353,6 +353,20 @@ pre.response {
 .tree-node-meta { fill: var(--text-2); font-family: var(--mono); font-size: 10px; }
 .tree-edge { stroke: var(--line); fill: none; stroke-width: 1.2; }
 
+/* ─── Timeline view ──────────────────────────────────────────────── */
+.tl-label    { fill: var(--text-1); font-family: var(--mono); font-size: 11px; }
+.tl-bartext  { fill: var(--bg); font-family: var(--mono); font-size: 10px; opacity: 0.85; }
+.tl-tick     { stroke: var(--line); stroke-width: 1; }
+.tl-ticklabel{ fill: var(--text-2); font-family: var(--mono); font-size: 10px; }
+.tl-now      { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 2 3; }
+.tl-bar              { fill: var(--bg-3); }
+.tl-bar.s-running    { fill: var(--accent); }
+.tl-bar.s-completed  { fill: var(--good); }
+.tl-bar.s-failed     { fill: var(--bad); }
+.tl-bar.s-cancelled  { fill: var(--muted); }
+.tl-bar.s-merge_failed { fill: var(--warn); }
+.tl-bar.s-created    { fill: var(--bg-3); stroke: var(--text-2); stroke-width: 1; }
+
 /* ─── Summary strip (top of subagents) ───────────────────────────── */
 .summary-strip {
   display: grid;

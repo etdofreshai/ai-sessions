@@ -15,7 +15,15 @@ export interface LogLine {
 }
 
 const buf: LogLine[] = [];
+const subscribers = new Set<(line: LogLine) => void>();
 let installed = false;
+
+// Subscribe to new log lines as they arrive (used by /logs/stream SSE).
+// Returns an unsubscribe function.
+export function subscribe(fn: (line: LogLine) => void): () => void {
+  subscribers.add(fn);
+  return () => { subscribers.delete(fn); };
+}
 
 export function installLogCapture(): void {
   if (installed) return;
@@ -46,6 +54,9 @@ export function installLogCapture(): void {
 function push(line: LogLine): void {
   buf.push(line);
   if (buf.length > CAPACITY) buf.splice(0, buf.length - CAPACITY);
+  for (const fn of subscribers) {
+    try { fn(line); } catch { /* never crash on a slow subscriber */ }
+  }
 }
 
 export function tail(limit = 500): LogLine[] {

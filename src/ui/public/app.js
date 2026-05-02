@@ -5,6 +5,7 @@
 // (called when the route changes). Views poll their own data on
 // intervals; the router cancels them on unmount.
 
+import { mount as mountDashboard } from "/ui/views/dashboard.js";
 import { mount as mountSubagents } from "/ui/views/subagents.js";
 import { mount as mountSessions  } from "/ui/views/sessions.js";
 import { mount as mountHooks     } from "/ui/views/hooks.js";
@@ -18,6 +19,7 @@ import { mount as mountHelp      } from "/ui/views/help.js";
 import { mount as mountAfk       } from "/ui/views/afk.js";
 
 const ROUTES = {
+  dashboard: { mount: mountDashboard, title: "Dashboard" },
   subagents: { mount: mountSubagents, title: "Subagents" },
   sessions:  { mount: mountSessions,  title: "Sessions" },
   session:   { mount: mountSession,   title: "Session" },
@@ -39,7 +41,7 @@ const drawerTitle = document.getElementById("drawer-title");
 let currentCleanup = null;
 
 function parseHash() {
-  const h = window.location.hash.replace(/^#\/?/, "") || "subagents";
+  const h = window.location.hash.replace(/^#\/?/, "") || "dashboard";
   const [route, ...rest] = h.split("/");
   return { route, params: rest };
 }
@@ -71,7 +73,7 @@ function render() {
 
 window.addEventListener("hashchange", render);
 window.addEventListener("DOMContentLoaded", () => {
-  if (!window.location.hash) window.location.hash = "#/subagents";
+  if (!window.location.hash) window.location.hash = "#/dashboard";
   render();
   pingServerMeta();
 });

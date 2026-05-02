@@ -3,7 +3,7 @@
 
 import { escapeHtml, fmtAge, fmtAbs, getJSON, poll, store } from "/ui/app.js";
 
-export function mount(root) {
+export function mount(root, ctx) {
   const filterSession = store.get("hooks.session", "");
   const limit = store.get("hooks.limit", 200);
 
@@ -43,6 +43,8 @@ export function mount(root) {
     }
     rows.sort((a, b) => (b.receivedAt ?? "").localeCompare(a.receivedAt ?? ""));
     root.querySelector("#hk-count").textContent = `${rows.length} events`;
+    // Stash for drawer lookup; rows have a stable `id` (autoincrement).
+    const byId = new Map(rows.map((r) => [r.id, r]));
     root.querySelector("#hk-table").innerHTML = `
       <table class="data">
         <thead>
@@ -57,7 +59,7 @@ export function mount(root) {
         </thead>
         <tbody>
           ${rows.map((r) => `
-            <tr>
+            <tr class="row" data-id="${escapeHtml(r.id)}">
               <td class="mono" title="${escapeHtml(fmtAbs(r.receivedAt))}">${fmtAge(r.receivedAt)}</td>
               <td class="mono">${escapeHtml(r.harness ?? "")}</td>
               <td class="mono" style="color:var(--accent-2)">${escapeHtml(r.eventName ?? "")}</td>
@@ -69,6 +71,37 @@ export function mount(root) {
         </tbody>
       </table>
     `;
+    root.querySelectorAll("tr.row").forEach((tr) => {
+      tr.addEventListener("click", (e) => {
+        if (e.target.closest("a")) return;
+        const r = byId.get(Number(tr.dataset.id));
+        if (r) openHookDrawer(r, ctx);
+      });
+    });
   };
   return poll(rerender, 5000);
+}
+
+function openHookDrawer(r, ctx) {
+  const body = document.createElement("div");
+  const kv = (k, v) => `<div class="k">${escapeHtml(k)}</div><div class="v">${v}</div>`;
+  body.innerHTML = `
+    <div class="kv">
+      ${kv("age", `${escapeHtml(fmtAge(r.receivedAt))} ago`)}
+      ${kv("received", escapeHtml(fmtAbs(r.receivedAt)))}
+      ${kv("harness", `<span class="mono">${escapeHtml(r.harness ?? "")}</span>`)}
+      ${kv("event", `<span class="mono" style="color:var(--accent-2)">${escapeHtml(r.eventName ?? "")}</span>`)}
+      ${kv("tool", `<span class="mono">${escapeHtml(r.toolName ?? "—")}</span>`)}
+      ${kv("session", `<span class="mono">${escapeHtml(r.sessionId ?? "—")}</span>`)}
+      ${kv("ai-session", r.aiSessionId
+        ? `<a href="#/session/${escapeHtml(r.aiSessionId)}"><span class="mono">${escapeHtml(r.aiSessionId)}</span></a>`
+        : "—")}
+    </div>
+    <h3 class="section-h">payload</h3>
+    <pre class="response">${escapeHtml(JSON.stringify(r.payload, null, 2))}</pre>
+  `;
+  ctx.drawer({
+    title: `${r.harness ?? ""} · ${r.eventName ?? ""} · ${r.toolName ?? ""}`,
+    body,
+  });
 }

@@ -25,6 +25,7 @@ import { VERSION, GIT } from "../version.js";
 import * as hookStore from "../hooks/store.js";
 import { ingestHook } from "../hooks/ingest.js";
 import * as logBuffer from "../logs/buffer.js";
+import * as stats from "../stats/index.js";
 import type { SubAgent } from "../sub-agents/types.js";
 import type { CronTarget } from "../crons/types.js";
 
@@ -806,11 +807,43 @@ export function createApp() {
     }
   });
 
+  // Aggregate dashboard stats — rolling counts (last 1h / last min) and
+  // snapshot totals across subagents, hooks, sessions, jobs, crons.
+  app.get("/stats", (_req, res) => {
+    try { res.json(stats.snapshot()); }
+    catch (e: any) { res.status(500).json({ error: e?.message ?? String(e) }); }
+  });
+
   // Server log tail — drains the in-memory ring buffer. Useful for the
   // dashboard's Logs view; not a substitute for docker/dokploy logs.
   app.get("/logs", (req, res) => {
     const limit = Math.min(Number(req.query.limit ?? 500), 4000) || 500;
     res.json({ size: logBuffer.size(), lines: logBuffer.tail(limit) });
+  });
+
+  // Server-Sent Events stream of new log lines + an initial backfill of
+  // the recent tail. The dashboard's Logs view uses this so the user
+  // sees new lines without polling delay.
+  app.get("/logs/stream", (req, res) => {
+    const backfill = Math.min(Number(req.query.backfill ?? 200), 2000) || 200;
+    res.set({
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      // Some reverse proxies buffer text/event-stream by default.
+      "X-Accel-Buffering": "no",
+    });
+    res.flushHeaders?.();
+    const send = (line: logBuffer.LogLine): void => {
+      res.write(`data: ${JSON.stringify(line)}\n\n`);
+    };
+    for (const line of logBuffer.tail(backfill)) send(line);
+    const unsub = logBuffer.subscribe(send);
+    const heartbeat = setInterval(() => res.write(`: ping\n\n`), 15_000);
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      unsub();
+    });
   });
 
   app.get("/hooks", (req, res) => {

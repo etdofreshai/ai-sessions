@@ -385,6 +385,44 @@ pre.response {
 .summary-strip .card.alert  { border-color: var(--bad); }
 .summary-strip .card.alive  { border-color: var(--accent); }
 
+/* ─── Dashboard grid (overview) ──────────────────────────────────── */
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  max-width: 1200px;
+  margin-bottom: 24px;
+}
+.dash-grid .card {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dash-grid .card .v {
+  font-family: var(--mono);
+  font-size: 24px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+.dash-grid .card .k {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.dash-grid .card .hint {
+  font-size: 11px;
+  color: var(--text-2);
+  margin-top: 4px;
+}
+.dash-grid .card.alert  { border-color: var(--bad); }
+.dash-grid .card.alive  { border-color: var(--accent); }
+
 /* ─── Sparkline cells ────────────────────────────────────────────── */
 table.data td.spark {
   width: 90px;

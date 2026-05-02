@@ -281,8 +281,16 @@ async function runChild(
 
   // Inject the result back into the parent session as the next turn so
   // the parent agent can reason about the sub-agent's output without
-  // having to poll. Same pattern jobs/resume use.
-  if (parent) {
+  // having to poll. Same pattern jobs/resume use. Skipped when the
+  // linked task has notify_supervisor=0 — for fire-and-forget work
+  // where the supervisor wants to poll /subagents later instead of
+  // being woken on completion.
+  let suppressInject = false;
+  if (taskId) {
+    const t = taskStore.read(taskId);
+    if (t && t.notifySupervisor === false) suppressInject = true;
+  }
+  if (parent && !suppressInject) {
     const prefix = `[sub-agent ${subId} provider=${child.provider} status=${meta.status}${
       subRow?.label ? ` label="${subRow.label}"` : ""
     }]`;

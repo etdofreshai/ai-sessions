@@ -44,6 +44,7 @@ export interface SubAgentTask {
   attemptCount: number;
   maxAttempts: number;
   timeoutSeconds: number;
+  notifySupervisor: boolean;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;

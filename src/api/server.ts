@@ -518,6 +518,7 @@ export function createApp() {
         mergeStrategy: body.mergeStrategy,
         maxAttempts: body.maxAttempts,
         timeoutSeconds: body.timeoutSeconds,
+        notifySupervisor: body.notifySupervisor,
         dependsOn: body.dependsOn,
       });
       if (planOnly) {

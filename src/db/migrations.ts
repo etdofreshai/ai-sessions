@@ -252,4 +252,13 @@ export const migrations: string[] = [
   );
   CREATE INDEX sub_agent_task_events_task ON sub_agent_task_events(task_id, created_at);
   `,
+
+  // 9. sub_agent_tasks.notify_supervisor — when 0, the runner finishes
+  // the subagent normally (status mirrors, response stored, events
+  // logged) but skips injectTurnOnSession on the parent. Use case:
+  // long-running fire-and-forget work where the supervisor wants to
+  // poll /subagents later instead of being woken on completion.
+  `
+  ALTER TABLE sub_agent_tasks ADD COLUMN notify_supervisor INTEGER NOT NULL DEFAULT 1;
+  `,
 ];

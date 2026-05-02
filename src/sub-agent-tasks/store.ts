@@ -28,6 +28,7 @@ interface TaskRow {
   attempt_count: number;
   max_attempts: number;
   timeout_seconds: number;
+  notify_supervisor: number;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -70,6 +71,7 @@ function fromTaskRow(r: TaskRow): SubAgentTask {
     attemptCount: r.attempt_count,
     maxAttempts: r.max_attempts,
     timeoutSeconds: r.timeout_seconds,
+    notifySupervisor: r.notify_supervisor !== 0,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     startedAt: r.started_at ?? undefined,
@@ -133,6 +135,7 @@ export interface CreateTaskArgs {
   mergeStrategy?: TaskMergeStrategy;
   maxAttempts?: number;
   timeoutSeconds?: number;
+  notifySupervisor?: boolean;
   dependsOn?: string[];
 }
 
@@ -144,10 +147,12 @@ export function create(args: CreateTaskArgs): SubAgentTask {
        (id, ai_session_id, title, prompt, status,
         provider, effort, cwd, base_ref, branch_name, worktree_path,
         merge_strategy, attempt_count, max_attempts, timeout_seconds,
+        notify_supervisor,
         created_at, updated_at)
      VALUES (?, ?, ?, ?, 'created',
              ?, ?, ?, ?, ?, ?,
              ?, 0, ?, ?,
+             ?,
              ?, ?)`,
   ).run(
     id,
@@ -163,6 +168,7 @@ export function create(args: CreateTaskArgs): SubAgentTask {
     args.mergeStrategy ?? "auto",
     args.maxAttempts ?? 2,
     args.timeoutSeconds ?? 1200,
+    args.notifySupervisor === false ? 0 : 1,
     now,
     now,
   );
@@ -222,6 +228,7 @@ export interface UpdateTaskArgs {
   mergeStrategy?: TaskMergeStrategy;
   maxAttempts?: number;
   timeoutSeconds?: number;
+  notifySupervisor?: boolean;
 }
 
 export function update(id: string, args: UpdateTaskArgs): SubAgentTask | null {
@@ -245,6 +252,10 @@ export function update(id: string, args: UpdateTaskArgs): SubAgentTask | null {
       sets.push(`${col} = ?`);
       params.push((args as Record<string, unknown>)[k]);
     }
+  }
+  if (args.notifySupervisor !== undefined) {
+    sets.push(`notify_supervisor = ?`);
+    params.push(args.notifySupervisor ? 1 : 0);
   }
   if (!sets.length) return read(id);
   sets.push(`updated_at = ?`);

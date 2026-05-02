@@ -1125,14 +1125,9 @@ export class TelegramChannel implements Channel {
       const { workspaceDir } = await import("../config.js");
       const wsDir = workspaceDir();
       const { spawn } = await import("node:child_process");
-      const args =
-        sub === "pull"
-          ? ["pull", "--rebase", "--autostash"]
-          : ["push"];
-      const stopTyping = this.startTyping(chatId);
-      const run = (): Promise<{ code: number; out: string }> =>
+      const runGit = (gitArgs: string[]): Promise<{ code: number; out: string }> =>
         new Promise((resolve) => {
-          const child = spawn("git", args, {
+          const child = spawn("git", gitArgs, {
             cwd: wsDir,
             shell: false,
             env: process.env,
@@ -1153,8 +1148,29 @@ export class TelegramChannel implements Channel {
             resolve({ code: code ?? 0, out: buf });
           });
         });
+      const stopTyping = this.startTyping(chatId);
       try {
-        const { code, out } = await run();
+        // Resolve the current branch so pull/push work even without an
+        // upstream-tracking ref configured. (Some deployed workspaces
+        // were checked out detached or via a fetch that didn't set
+        // upstream — passing `origin <branch>` explicitly avoids
+        // "no tracking information" errors.)
+        const { code: brCode, out: brOut } = await runGit([
+          "rev-parse", "--abbrev-ref", "HEAD",
+        ]);
+        const branch = brOut.trim();
+        if (brCode !== 0 || !branch || branch === "HEAD") {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: `❌ couldn't resolve workspace branch (cwd=${wsDir}, exit=${brCode})\n\n${brOut.trim().slice(0, 1500)}`,
+          });
+          return true;
+        }
+        const args =
+          sub === "pull"
+            ? ["pull", "--rebase", "--autostash", "origin", branch]
+            : ["push", "origin", branch];
+        const { code, out } = await runGit(args);
         const trimmed = (out || "(no output)").trim().slice(0, 3500);
         const icon = code === 0 ? "✅" : "❌";
         await api.sendMessage({

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ai-sessions · console</title>
+  <link rel="stylesheet" href="/ui/style.css" />
+  <link rel="icon" href="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'&gt;&lt;rect width='64' height='64' rx='12' fill='%23151821'/&gt;&lt;text x='50%' y='56%' font-family='ui-monospace,monospace' font-size='32' text-anchor='middle' fill='%2378d9c8'&gt;ai&lt;/text&gt;&lt;/svg&gt;" />
+</head>
+<body>
+  <aside id="nav">
+    <div class="brand">
+      <span class="dot"></span>
+      <span class="brand-text">ai-sessions</span>
+    </div>
+    <nav>
+      <a href="#/subagents" data-route="subagents">Subagents</a>
+      <a href="#/sessions"  data-route="sessions">Sessions</a>
+      <a href="#/hooks"     data-route="hooks">Hooks</a>
+      <a href="#/usage"     data-route="usage">Usage</a>
+      <a href="#/crons"     data-route="crons">Crons</a>
+      <a href="#/jobs"      data-route="jobs">Jobs</a>
+      <a href="#/tree"      data-route="tree">Tree</a>
+      <a href="#/logs"      data-route="logs">Logs</a>
+    </nav>
+    <div class="footer">
+      <div id="server-meta"></div>
+      <div id="last-poll" class="muted"></div>
+    </div>
+  </aside>
+  <main id="content">
+    <div id="loading" class="placeholder">loading…</div>
+  </main>
+  <aside id="drawer" class="drawer hidden">
+    <header>
+      <span id="drawer-title">—</span>
+      <button id="drawer-close" aria-label="close">×</button>
+    </header>
+    <div id="drawer-body"></div>
+  </aside>
+  <script type="module" src="/ui/app.js"></script>
+</body>
+</html>

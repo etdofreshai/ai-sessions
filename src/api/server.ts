@@ -1,5 +1,7 @@
 import express from "express";
 import type { Request, Response } from "express";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve as resolvePath } from "node:path";
 import { getProvider, listProviderNames, providers } from "../providers/index.js";
 import { defaultYolo } from "../providers/types.js";
 import { dataDir, workspaceDir } from "../config.js";
@@ -22,6 +24,7 @@ import { getUsage } from "../usage/index.js";
 import { VERSION, GIT } from "../version.js";
 import * as hookStore from "../hooks/store.js";
 import { ingestHook } from "../hooks/ingest.js";
+import * as logBuffer from "../logs/buffer.js";
 import type { SubAgent } from "../sub-agents/types.js";
 import type { CronTarget } from "../crons/types.js";
 
@@ -99,6 +102,21 @@ function validateCronTarget(target: any): { ok: true; target: CronTarget } | { o
 export function createApp() {
   const app = express();
   app.use(express.json({ limit: "8mb" }));
+
+  // Dashboard UI — vanilla HTML/CSS/JS shell that polls the JSON API.
+  // Resolved at runtime relative to dist/api/server.js so the same code
+  // works in dev (tsx) and prod (node dist).
+  {
+    const here = fileURLToPath(new URL(import.meta.url));
+    const distDir = dirname(here); // .../dist/api
+    const repoRoot = resolvePath(distDir, "..", "..");
+    const uiDir = resolvePath(repoRoot, "src", "ui", "public");
+    app.use("/ui", express.static(uiDir, { fallthrough: true, index: "index.html" }));
+    // Hash routing: any /ui/<anything> falls back to index.html.
+    app.get(/^\/ui\/.+$/, (_req, res) => {
+      res.sendFile(resolvePath(uiDir, "index.html"));
+    });
+  }
 
   app.get("/", (_req, res) => {
     res.json({
@@ -788,6 +806,13 @@ export function createApp() {
     }
   });
 
+  // Server log tail — drains the in-memory ring buffer. Useful for the
+  // dashboard's Logs view; not a substitute for docker/dokploy logs.
+  app.get("/logs", (req, res) => {
+    const limit = Math.min(Number(req.query.limit ?? 500), 4000) || 500;
+    res.json({ size: logBuffer.size(), lines: logBuffer.tail(limit) });
+  });
+
   app.get("/hooks", (req, res) => {
     const sessionId = (req.query.session_id as string | undefined) ?? undefined;
     const limit = Math.min(Number(req.query.limit ?? 200), 1000) || 200;
@@ -831,6 +856,8 @@ export function createApp() {
 }
 
 export function startServer(port: number) {
+  // Install before any other console.log so the buffer captures startup.
+  logBuffer.installLogCapture();
   const app = createApp();
   const server = app.listen(port, () => {
     console.log(`ai-sessions API listening on http://localhost:${port}`);

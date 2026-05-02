@@ -4,8 +4,40 @@
 
 import {
   escapeHtml, fmtSec, fmtAge, fmtAbs,
-  statusBadge, getJSON, poll, store,
+  statusBadge, getJSON, poll, store, toast,
 } from "/ui/app.js";
+import { openCreateModal } from "/ui/views/create.js";
+
+// Client-side activity buffer keyed by task id. Each entry is the last
+// SPARK_LEN samples of activityCount (oldest first). We compute deltas
+// on render to draw sparklines without server changes.
+const SPARK_LEN = 30;
+const activityBuf = new Map();
+function recordSample(t) {
+  const key = t.id;
+  const arr = activityBuf.get(key) ?? [];
+  arr.push(Number(t.activityCount ?? 0));
+  if (arr.length > SPARK_LEN) arr.splice(0, arr.length - SPARK_LEN);
+  activityBuf.set(key, arr);
+  return arr;
+}
+function sparkline(samples) {
+  // Render deltas (per-poll activity rate) as a tiny inline SVG.
+  if (samples.length < 2) return `<span class="muted mono">—</span>`;
+  const deltas = [];
+  for (let i = 1; i < samples.length; i++) deltas.push(Math.max(0, samples[i] - samples[i - 1]));
+  const max = Math.max(1, ...deltas);
+  const w = 80, h = 18;
+  const stepX = w / Math.max(1, deltas.length - 1);
+  const pts = deltas.map((d, i) => `${(i * stepX).toFixed(1)},${(h - (d / max) * h).toFixed(1)}`).join(" ");
+  const last = deltas[deltas.length - 1] ?? 0;
+  const stroke = last > 0 ? "var(--accent)" : "var(--muted)";
+  return `
+    <svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="display:block">
+      <polyline fill="none" stroke="${stroke}" stroke-width="1.4" points="${pts}" />
+    </svg>
+  `;
+}
 
 export function mount(root, ctx) {
   const filterSession = store.get("subagents.session", "");
@@ -16,9 +48,11 @@ export function mount(root, ctx) {
     <div class="view-header">
       <h1>Subagents</h1>
       <div class="actions">
+        <button id="sa-new" title="Create a new subagent">+ new subagent</button>
         <span id="sa-count" class="muted mono"></span>
       </div>
     </div>
+    <div id="sa-summary-cards" class="summary-strip"></div>
     <div class="view-controls">
       <label>session
         <select id="sa-session"><option value="">— all —</option></select>
@@ -37,7 +71,6 @@ export function mount(root, ctx) {
       <label><input type="checkbox" id="sa-deleted" /> show deleted</label>
       <span class="muted">refresh every 4s</span>
     </div>
-    <div id="sa-summary" class="view-controls"></div>
     <div id="sa-table"></div>
   `;
 
@@ -48,12 +81,12 @@ export function mount(root, ctx) {
   delChk.checked = !!showDeleted;
 
   // Populate session dropdown once.
+  let sessionsCache = [];
   getJSON("/sessions").then((sessions) => {
+    sessionsCache = sessions;
+    sessions.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
     sel.innerHTML = `<option value="">— all —</option>` +
-      sessions
-        .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
-        .map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name ?? s.id.slice(0,8))} · ${escapeHtml(s.provider)}</option>`)
-        .join("");
+      sessions.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name ?? s.id.slice(0,8))} · ${escapeHtml(s.provider)}</option>`).join("");
     sel.value = filterSession;
   }).catch(() => {});
 
@@ -77,6 +110,8 @@ export function mount(root, ctx) {
       return;
     }
     lastRows = rows;
+    rows.forEach(recordSample);
+    paintSummary(root, rows);
     paint(root, rows, selectedId, ctx, (id) => {
       selectedId = id;
       openSubagentDrawer(id, ctx);
@@ -95,10 +130,48 @@ export function mount(root, ctx) {
     store.set("subagents.showDeleted", delChk.checked);
     rerender();
   });
+  root.querySelector("#sa-new").addEventListener("click", () => {
+    openCreateModal({
+      sessions: sessionsCache,
+      defaultSessionId: sel.value || sessionsCache[0]?.id,
+      onCreated: () => rerender(),
+    });
+  });
 
   if (selectedId) openSubagentDrawer(selectedId, ctx);
 
   return poll(rerender, 4000);
+}
+
+function paintSummary(root, rows) {
+  const counts = rows.reduce((m, r) => ((m[r.status] = (m[r.status] ?? 0) + 1), m), {});
+  const running = counts.running ?? 0;
+  const created = counts.created ?? 0;
+  const failed = (counts.failed ?? 0) + (counts.merge_failed ?? 0);
+  const completed = counts.completed ?? 0;
+  // Recent activity rate: total deltas across all running rows over the
+  // last sample (4s).
+  let recentDelta = 0;
+  for (const r of rows) {
+    if (r.status !== "running") continue;
+    const arr = activityBuf.get(r.id);
+    if (arr && arr.length >= 2) {
+      recentDelta += Math.max(0, arr[arr.length - 1] - arr[arr.length - 2]);
+    }
+  }
+  const card = (label, value, cls = "") => `
+    <div class="card ${cls}">
+      <div class="v">${value}</div>
+      <div class="k">${label}</div>
+    </div>
+  `;
+  root.querySelector("#sa-summary-cards").innerHTML = `
+    ${card("running",   `<span class="s-running mono">${running}</span>`,   running ? "alive" : "")}
+    ${card("queued",    `<span class="s-created mono">${created}</span>`)}
+    ${card("done",      `<span class="s-completed mono">${completed}</span>`)}
+    ${card("failed",    `<span class="s-failed mono">${failed}</span>`,    failed ? "alert" : "")}
+    ${card("msgs/4s",   `<span class="mono">${recentDelta}</span>`,        recentDelta ? "alive" : "")}
+  `;
 }
 
 function paint(root, rows, selectedId, ctx, onSelect) {
@@ -110,17 +183,11 @@ function paint(root, rows, selectedId, ctx, onSelect) {
     return (b.createdAt ?? "").localeCompare(a.createdAt ?? "");
   });
 
-  const counts = rows.reduce((m, r) => ((m[r.status] = (m[r.status] ?? 0) + 1), m), {});
-  const sumLine = Object.entries(counts)
-    .sort((a, b) => (order[a[0]] ?? 9) - (order[b[0]] ?? 9))
-    .map(([s, n]) => `${statusBadge(s)} <span class="mono">${n}</span>`)
-    .join(" &nbsp; ");
-  root.querySelector("#sa-summary").innerHTML = sumLine || `<span class="muted">no subagents</span>`;
   root.querySelector("#sa-count").textContent = `${rows.length} row${rows.length === 1 ? "" : "s"}`;
 
   if (!rows.length) {
     root.querySelector("#sa-table").innerHTML =
-      `<div class="placeholder">no subagents match the current filters</div>`;
+      `<div class="placeholder">no subagents match the current filters · click <strong>+ new subagent</strong> to create one</div>`;
     return;
   }
 
@@ -133,6 +200,7 @@ function paint(root, rows, selectedId, ctx, onSelect) {
           <th>provider</th>
           <th>title</th>
           <th class="num">msgs</th>
+          <th>activity</th>
           <th class="num">age</th>
           <th class="num">attempts</th>
           <th>session</th>
@@ -142,6 +210,7 @@ function paint(root, rows, selectedId, ctx, onSelect) {
         ${rows.map((r) => {
           const ageMs = now - Date.parse(r.updatedAt);
           const ageLabel = r.status === "running" ? `idle ${fmtSec(ageMs)}` : fmtSec(ageMs);
+          const samples = activityBuf.get(r.id) ?? [];
           return `
             <tr class="row ${r.id === selectedId ? "selected" : ""}" data-id="${escapeHtml(r.id)}">
               <td>${statusBadge(r.status)}</td>
@@ -149,6 +218,7 @@ function paint(root, rows, selectedId, ctx, onSelect) {
               <td class="mono">${escapeHtml(r.provider ?? "—")}</td>
               <td class="title" title="${escapeHtml(r.title ?? "")}">${escapeHtml(r.title ?? "")}</td>
               <td class="num">${r.activityCount ?? 0}</td>
+              <td class="spark">${sparkline(samples)}</td>
               <td class="num" title="${escapeHtml(fmtAbs(r.updatedAt))}">${ageLabel}</td>
               <td class="num">${r.attemptCount ?? 0}/${r.maxAttempts ?? 0}</td>
               <td class="mono" title="${escapeHtml(r.aiSessionId)}">${escapeHtml(r.aiSessionId.slice(0, 8))}</td>
@@ -176,7 +246,7 @@ async function openSubagentDrawer(id, ctx) {
     ]);
     paintDrawer(body, task, events);
     ctx.drawer({
-      title: `${task.id.slice(0, 8)} · ${escapeHtml(task.title ?? "")}`,
+      title: `${task.id.slice(0, 8)} · ${task.title ?? ""}`,
       body,
     });
   } catch (e) {
@@ -209,15 +279,15 @@ function paintDrawer(body, task, events) {
       ${task.subAgentId ? kv("runtime", `<span class="mono">${escapeHtml(task.subAgentId.slice(0,8))}</span>`) : ""}
     </div>
 
-    <h3 style="margin:18px 0 6px;font-size:12px;color:var(--text-1);font-weight:500;text-transform:uppercase;letter-spacing:0.06em;">prompt</h3>
+    <h3 class="section-h">prompt</h3>
     <pre class="response">${escapeHtml(task.prompt ?? "")}</pre>
 
     ${task.response ? `
-      <h3 style="margin:18px 0 6px;font-size:12px;color:var(--text-1);font-weight:500;text-transform:uppercase;letter-spacing:0.06em;">response</h3>
+      <h3 class="section-h">response</h3>
       <pre class="response">${escapeHtml(task.response)}</pre>
     ` : ""}
 
-    <h3 style="margin:18px 0 6px;font-size:12px;color:var(--text-1);font-weight:500;text-transform:uppercase;letter-spacing:0.06em;">events (${events.length})</h3>
+    <h3 class="section-h">events (${events.length})</h3>
     ${events.length === 0 ? `<div class="muted mono">no events</div>` :
       events.map((e) => `
         <div class="event-row evt-${escapeHtml(e.eventType)}">
@@ -227,7 +297,7 @@ function paintDrawer(body, task, events) {
       `).join("")
     }
 
-    <div style="margin-top:18px;display:flex;gap:8px;flex-wrap:wrap;">
+    <div class="action-row">
       ${task.status === "running" ? `<button data-act="cancel">cancel</button>` : ""}
       ${task.status === "created" || task.status === "merge_failed" ? `<button data-act="dispatch">dispatch</button>` : ""}
       ${!task.deletedAt ? `<button data-act="delete">delete</button>` : ""}
@@ -239,22 +309,28 @@ function paintDrawer(body, task, events) {
       const act = btn.dataset.act;
       try {
         if (act === "cancel") {
-          await fetch(`/subagents/${task.id}/cancel`, {
+          const r = await fetch(`/subagents/${task.id}/cancel`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ reason: "cancelled from console" }),
           });
+          if (!r.ok) throw new Error(`${r.status}: ${(await r.text()).slice(0, 200)}`);
+          toast("cancelled");
         } else if (act === "dispatch") {
-          await fetch(`/subagents/${task.id}/dispatch`, {
+          const r = await fetch(`/subagents/${task.id}/dispatch`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({}),
           });
+          if (!r.ok) throw new Error(`${r.status}: ${(await r.text()).slice(0, 200)}`);
+          toast("dispatched");
         } else if (act === "delete") {
-          await fetch(`/subagents/${task.id}`, { method: "DELETE" });
+          const r = await fetch(`/subagents/${task.id}`, { method: "DELETE" });
+          if (!r.ok) throw new Error(`${r.status}: ${(await r.text()).slice(0, 200)}`);
+          toast("deleted");
         }
       } catch (e) {
-        alert(e.message);
+        toast(e.message, "error");
       }
     });
   });

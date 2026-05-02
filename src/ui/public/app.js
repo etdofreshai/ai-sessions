@@ -72,6 +72,26 @@ window.addEventListener("DOMContentLoaded", () => {
 
 document.getElementById("drawer-close").addEventListener("click", closeDrawer);
 
+// Escape closes drawer (and the create modal handles its own escape).
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!drawer.classList.contains("hidden")) closeDrawer();
+  }
+});
+
+// Click outside drawer (on the main content) closes it.
+document.getElementById("content").addEventListener("click", (e) => {
+  // Only close if the click reaches an empty area, not a row click.
+  if (e.target.id === "content" && !drawer.classList.contains("hidden")) {
+    closeDrawer();
+  }
+});
+
+// Toast host element.
+const toastHost = document.createElement("div");
+toastHost.id = "toast-host";
+document.body.appendChild(toastHost);
+
 // ─── Drawer helpers (any view can call these) ──────────────────────
 export function openDrawer({ title, body }) {
   drawerTitle.textContent = title ?? "";
@@ -165,6 +185,23 @@ export function poll(fn, intervalMs) {
     clearInterval(heartbeat);
     if (footer) footer.textContent = "";
   };
+}
+
+// Toast: tiny floating notification used for action confirmations.
+// Variant defaults to neutral; pass "error" or "success" for color.
+export function toast(message, variant = "") {
+  const host = document.getElementById("toast-host");
+  if (!host) return;
+  const el = document.createElement("div");
+  el.className = `toast ${variant}`;
+  el.textContent = String(message ?? "");
+  host.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = "opacity 0.2s, transform 0.2s";
+    el.style.opacity = "0";
+    el.style.transform = "translateY(6px)";
+    setTimeout(() => el.remove(), 220);
+  }, variant === "error" ? 5200 : 2400);
 }
 
 // LocalStorage helpers — views remember their last filters across

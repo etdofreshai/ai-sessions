@@ -8,6 +8,29 @@ import {
 } from "/ui/app.js";
 import { openCreateModal } from "/ui/views/create.js";
 
+// Lightweight diff colorizer — wraps each line in a span with a class
+// based on the leading char so CSS can color it. No syntax-aware
+// parsing; just enough to make the diff readable.
+function colorizeDiff(pre) {
+  if (!pre) return;
+  const text = pre.textContent;
+  const lines = text.split(/\r?\n/);
+  pre.innerHTML = lines.map((line) => {
+    let cls = "";
+    if (line.startsWith("+++") || line.startsWith("---")) cls = "diff-meta";
+    else if (line.startsWith("@@")) cls = "diff-hunk";
+    else if (line.startsWith("+")) cls = "diff-add";
+    else if (line.startsWith("-")) cls = "diff-del";
+    else if (line.startsWith("diff ") || line.startsWith("index ")) cls = "diff-meta";
+    return `<span class="${cls}">${escapeHtmlLine(line)}</span>`;
+  }).join("\n");
+}
+function escapeHtmlLine(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
+  );
+}
+
 // Client-side activity buffer keyed by task id. Each entry is the last
 // SPARK_LEN samples of activityCount (oldest first). We compute deltas
 // on render to draw sparklines without server changes.
@@ -327,8 +350,10 @@ function paintDrawer(body, task, events) {
     <div class="action-row">
       ${task.status === "running" ? `<button data-act="cancel">cancel</button>` : ""}
       ${task.status === "created" || task.status === "merge_failed" ? `<button data-act="dispatch">dispatch</button>` : ""}
+      ${task.worktreePath ? `<button data-act="diff">view diff</button>` : ""}
       ${!task.deletedAt ? `<button data-act="delete">delete</button>` : ""}
     </div>
+    <div id="drawer-diff"></div>
   `;
 
   body.querySelectorAll("button[data-act]").forEach((btn) => {
@@ -355,6 +380,17 @@ function paintDrawer(body, task, events) {
           const r = await fetch(`/subagents/${task.id}`, { method: "DELETE" });
           if (!r.ok) throw new Error(`${r.status}: ${(await r.text()).slice(0, 200)}`);
           toast("deleted");
+        } else if (act === "diff") {
+          const slot = body.querySelector("#drawer-diff");
+          slot.innerHTML = `<h3 class="section-h">diff</h3><pre class="response">loading…</pre>`;
+          const r = await fetch(`/subagents/${task.id}/diff`);
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(j.error ?? `${r.status}`);
+          slot.innerHTML = `
+            <h3 class="section-h">diff (${escapeHtml(j.args?.join(" ") ?? "")})</h3>
+            <pre class="response diff-block">${escapeHtml(j.diff || "(no changes)")}</pre>
+          `;
+          colorizeDiff(slot.querySelector(".diff-block"));
         }
       } catch (e) {
         toast(e.message, "error");

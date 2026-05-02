@@ -836,6 +836,45 @@ export function createApp() {
     }
   });
 
+  // Worktree diff for a subagent — best-effort. Runs `git -C <wt>
+  // diff <base>..HEAD` (or just `git diff` if no base ref). Useful for
+  // reviewing AFK chunks from the dashboard without opening a terminal.
+  app.get("/subagents/:id/diff", async (req, res, next) => {
+    try {
+      const taskStore = await import("../sub-agent-tasks/store.js");
+      const task = taskStore.read(req.params.id);
+      if (!task) return res.status(404).json({ error: "subagent not found" });
+      if (!task.worktreePath) {
+        return res.status(409).json({ error: "no worktreePath set on this subagent" });
+      }
+      const { spawn } = await import("node:child_process");
+      const args = task.baseRef
+        ? ["diff", `${task.baseRef}..HEAD`]
+        : ["diff", "HEAD"];
+      const result: { code: number; out: string } = await new Promise((resolve) => {
+        const child = spawn("git", args, { cwd: task.worktreePath!, shell: false });
+        let buf = "";
+        child.stdout.on("data", (d) => (buf += d.toString()));
+        child.stderr.on("data", (d) => (buf += d.toString()));
+        const t = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* ignore */ } resolve({ code: 124, out: buf + "\n[timed out after 30s]" }); }, 30_000);
+        child.on("error", (e) => { clearTimeout(t); resolve({ code: 127, out: `[spawn error: ${e.message}]` }); });
+        child.on("exit", (code) => { clearTimeout(t); resolve({ code: code ?? 0, out: buf }); });
+      });
+      // Cap at 256 KB so a runaway diff doesn't blow up the response.
+      const MAX = 256 * 1024;
+      const trimmed = result.out.length > MAX ? result.out.slice(0, MAX) + "\n…[truncated]" : result.out;
+      res.json({
+        cwd: task.worktreePath,
+        baseRef: task.baseRef ?? null,
+        args,
+        exitCode: result.code,
+        diff: trimmed,
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
   app.get("/subagents/:id/events", async (req, res, next) => {
     try {
       const taskStore = await import("../sub-agent-tasks/store.js");

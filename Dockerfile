@@ -18,9 +18,12 @@ FROM node:22-slim
 #
 # Also install a baseline dev toolchain so agents running inside the
 # container can build and run native code without needing to apt-install
-# packages mid-task: gcc/g++/make from build-essential, Python 3, and a
-# handful of headers commonly required by `pip install` / `cargo build`
-# (openssl + pkg-config). Rust is installed in a separate layer below.
+# packages mid-task: gcc/g++/make from build-essential, cmake + ninja
+# for modern C/C++ projects, Python 3, and a handful of headers commonly
+# required by `pip install` / `cargo build` (openssl + pkg-config).
+# Plus some workhorse CLI tools agents reach for: ripgrep, file, patch,
+# unzip/zip, tree, bc, procps. Rust is installed in a separate layer
+# below.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -28,11 +31,21 @@ RUN apt-get update \
         git \
         jq \
         build-essential \
+        cmake \
+        ninja-build \
         pkg-config \
         libssl-dev \
         python3 \
         python3-pip \
         python3-venv \
+        ripgrep \
+        file \
+        patch \
+        unzip \
+        zip \
+        tree \
+        bc \
+        procps \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \

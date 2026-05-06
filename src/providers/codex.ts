@@ -236,6 +236,15 @@ export const codexProvider: Provider = {
                 }
               })
             );
+            // Streaming reasoning delta — Codex emits these as the model
+            // is producing internal-reasoning tokens. We forward as
+            // thinking events; channels render them with a distinct
+            // prefix so they don't get mixed into the final answer.
+            unsubs.push(
+              client.on("item/reasoning/delta", (p: any) => {
+                if (p?.delta) emit({ type: "thinking", text: String(p.delta) });
+              })
+            );
             unsubs.push(
               client.on("item/completed", (p: any) => {
                 const item = p?.item;
@@ -245,6 +254,14 @@ export const codexProvider: Provider = {
                     textOut = item.text;
                     emit({ type: "text", text: item.text });
                   }
+                } else if (item.type === "reasoning") {
+                  // Full reasoning block on item/completed. If the
+                  // delta stream already covered it, this duplicates;
+                  // most channels coalesce by accepting the longer one.
+                  // Older Codex builds use `text`; newer ones use
+                  // `summary`. Prefer whichever is present.
+                  const text = item.text ?? item.summary ?? "";
+                  if (text) emit({ type: "thinking", text: String(text) });
                 } else if (item.type === "command_execution") {
                   const input = { command: item.command, status: item.status };
                   synthesizeToolHooks("command_execution", input, item.output ?? item.result ?? item);

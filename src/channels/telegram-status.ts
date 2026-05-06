@@ -8,6 +8,10 @@ export interface StatusBlock {
   // Append a chunk to the current streaming-text segment. Token-friendly:
   // call repeatedly as the model streams. Long segments are tail-trimmed.
   appendText(chunk: string): void;
+  // Append a chunk to the current streaming "thinking" segment (rendered
+  // with a 💭 prefix). Same coalescing as appendText but separate so a
+  // tool_use line in between forces a new thinking bubble line.
+  appendThinking(chunk: string): void;
   // Convert the most recent 🔧 line to ✓ — call when a tool resolves.
   markLastDone(): void;
   // Replace the bubble's body with the final response text. Tries HTML
@@ -34,6 +38,10 @@ export async function openStatusBlock(
   const lines: string[] = [PLACEHOLDER];
   // Index of the in-progress "💬 …" text line within `lines`, if any.
   let currentTextIdx: number | null = null;
+  // Index of the in-progress "💭 …" thinking line. Reset to null any
+  // time a non-thinking push lands so a new thinking burst starts on
+  // its own line below the most recent activity.
+  let currentThinkIdx: number | null = null;
   let messageId: number | null = null;
   let lastEditAt = 0;
   let pending: NodeJS.Timeout | null = null;
@@ -89,14 +97,19 @@ export async function openStatusBlock(
       currentTextIdx -= dropCount;
       if (currentTextIdx < startIdx) currentTextIdx = null;
     }
+    if (currentThinkIdx != null) {
+      currentThinkIdx -= dropCount;
+      if (currentThinkIdx < startIdx) currentThinkIdx = null;
+    }
   };
 
   return {
     push(line: string) {
       dropPlaceholder();
-      // Any non-text line ends the current streaming text block, so the
-      // next text chunk starts in its own bubble line.
+      // Any non-text line ends the current streaming text/thinking
+      // blocks, so the next text/thinking chunk starts in its own line.
       currentTextIdx = null;
+      currentThinkIdx = null;
       lines.push(line);
       trimLines();
       schedule();
@@ -104,6 +117,9 @@ export async function openStatusBlock(
     appendText(chunk: string) {
       if (!chunk) return;
       dropPlaceholder();
+      // Text starts a new line below any in-progress thinking so the
+      // final answer is visually distinct from the model's reasoning.
+      currentThinkIdx = null;
       if (currentTextIdx == null) {
         lines.push(`💬 ${chunk}`);
         currentTextIdx = lines.length - 1;
@@ -115,6 +131,25 @@ export async function openStatusBlock(
           cur = "💬 …" + cur.slice(-TEXT_LINE_MAX);
         }
         lines[currentTextIdx] = cur;
+      }
+      trimLines();
+      schedule();
+    },
+    appendThinking(chunk: string) {
+      if (!chunk) return;
+      dropPlaceholder();
+      // Thinking starts a new line below the answer if one is already in
+      // progress (rare but possible), to keep the two streams separated.
+      currentTextIdx = null;
+      if (currentThinkIdx == null) {
+        lines.push(`💭 ${chunk}`);
+        currentThinkIdx = lines.length - 1;
+      } else {
+        let cur = lines[currentThinkIdx] + chunk;
+        if (cur.length > TEXT_LINE_MAX + 2) {
+          cur = "💭 …" + cur.slice(-TEXT_LINE_MAX);
+        }
+        lines[currentThinkIdx] = cur;
       }
       trimLines();
       schedule();

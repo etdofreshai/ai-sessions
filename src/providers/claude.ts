@@ -293,6 +293,12 @@ export function makeClaudeFlavoredProvider(cfg: ClaudeFlavorConfig): Provider {
               if (block?.type === "text" && block.text) {
                 chunks.push(block.text);
                 emit({ type: "text", text: block.text });
+              } else if (block?.type === "thinking" && (block.thinking || block.text)) {
+                // Claude returns thinking blocks as { type:'thinking',
+                // thinking:'...'} (older shape: { text }). Forward as a
+                // dedicated thinking event so channels can render it
+                // distinct from the final answer.
+                emit({ type: "thinking", text: String(block.thinking ?? block.text) });
               } else if (block?.type === "tool_use") {
                 emit({
                   type: "tool_use",

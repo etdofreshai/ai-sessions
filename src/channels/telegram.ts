@@ -1931,6 +1931,7 @@ export class TelegramChannel implements Channel {
         const live = getLive(handle.meta.runId);
         const watcher = (async () => {
           if (!live) return;
+          const THINK_LINE_MAX = 600;
           for await (const ev of live.events) {
             if (ev.type === "tool_use") {
               const inputStr = formatToolInput(ev.input);
@@ -1942,6 +1943,21 @@ export class TelegramChannel implements Channel {
                 lines[lines.length - 1] = last.replace(/^🔧/, "✓");
               }
               trace.events.push({ ts: Date.now(), type: "tool_result", name: ev.name, output: ev.output });
+            } else if (ev.type === "thinking") {
+              // Coalesce thinking deltas onto a single trailing line —
+              // streaming reasoning otherwise blows past MAX_LINES in
+              // seconds. Tail-trim once the running line gets long.
+              const last = lines[lines.length - 1] ?? "";
+              if (last.startsWith("💭")) {
+                let merged = last + ev.text;
+                if (merged.length > THINK_LINE_MAX + 4) {
+                  merged = "💭 …" + merged.slice(-THINK_LINE_MAX);
+                }
+                lines[lines.length - 1] = merged;
+              } else {
+                lines.push(`💭 ${ev.text.slice(0, THINK_LINE_MAX)}`);
+              }
+              trace.events.push({ ts: Date.now(), type: "thinking" as any, name: "thinking", input: ev.text } as any);
             } else if (ev.type === "error") {
               console.error("[telegram] sub-agent run error event:", ev.message);
               lines.push(`❌ ${ev.message}`);
@@ -2206,6 +2222,13 @@ export class TelegramChannel implements Channel {
             } catch (e) {
               console.error("[telegram] sendPhoto failed:", e);
             }
+          } else if (ev.type === "thinking") {
+            // Reasoning stream from the SDK (Claude assistant content
+            // blocks of type='thinking' or Codex item/reasoning/delta).
+            // Coalesces into a 💭-prefixed line at the top of the
+            // bubble; trace records the full text for /trace.
+            status.appendThinking(ev.text);
+            trace.events.push({ ts: Date.now(), type: "thinking" as any, name: "thinking", input: ev.text } as any);
           } else if (ev.type === "error") {
             console.error("[telegram] route run error event:", ev.message);
             status.push(`❌ ${ev.message}`);

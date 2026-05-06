@@ -8,6 +8,11 @@ export type RunStatus =
 export type RunEvent =
   | { type: "session_id"; sessionId: string }
   | { type: "text"; text: string }
+  // Internal-reasoning ("thinking") block surfaced by Claude (assistant
+  // content blocks with type='thinking') and Codex (item.type='reasoning').
+  // Channels render this with a distinct prefix so it doesn't get mixed
+  // into the final answer text.
+  | { type: "thinking"; text: string }
   | { type: "tool_use"; name: string; input?: unknown }
   | { type: "tool_result"; name?: string; output?: unknown }
   | { type: "image"; path?: string; bytes?: string; mimeType?: string; caption?: string }

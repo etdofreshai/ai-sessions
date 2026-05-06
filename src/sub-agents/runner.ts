@@ -229,6 +229,8 @@ async function runChild(
       } catch (e) {
         console.error(`[sub-agents] ${subId} sendPhoto failed:`, e);
       }
+    } else if (ev.type === "thinking") {
+      if (status) status.appendThinking(ev.text);
     } else if (ev.type === "error") {
       if (status) status.push(`❌ ${ev.message}`);
     }
